@@ -85,6 +85,54 @@ def pil_to_qimage(img):
     return qimage
 
 
+def band_to_array(img_bgr, band, normalize=True):
+    """Extract one band from a BGR (OpenCV) image as an 8-bit 2D array.
+
+    BGR band order matches ``extract_channel.py``: band 0 = depth,
+    band 1 = reflectance, band 2 = other feature. Non-8-bit bands are
+    min-max normalized into 0-255 when ``normalize`` is True.
+    """
+    if img_bgr is None or img_bgr.ndim < 3 or band >= img_bgr.shape[2]:
+        return None
+    channel = img_bgr[:, :, band]
+    if normalize and channel.dtype != np.uint8:
+        mn = float(channel.min())
+        mx = float(channel.max())
+        if mx - mn > 0:
+            channel = (
+                (channel.astype(np.float64) - mn)
+                * 255.0
+                / (mx - mn)
+            )
+            channel = np.clip(channel, 0, 255).astype(np.uint8)
+        else:
+            channel = np.zeros(channel.shape, dtype=np.uint8)
+    return np.ascontiguousarray(channel)
+
+
+def band_to_pil(img_bgr, band, normalize=True):
+    """Extract one BGR band as an 8-bit grayscale PIL Image."""
+    data = band_to_array(img_bgr, band, normalize=normalize)
+    if data is None:
+        return None
+    return PIL.Image.fromarray(data, mode="L")
+
+
+def band_to_qimage(img_bgr, band, normalize=True):
+    """Extract one BGR band as an 8-bit grayscale QImage."""
+    data = band_to_array(img_bgr, band, normalize=normalize)
+    if data is None:
+        return QtGui.QImage()
+    height, width = data.shape
+    return QtGui.QImage(
+        data,
+        width,
+        height,
+        width,
+        QtGui.QImage.Format.Format_Grayscale8,
+    )
+
+
 def img_data_to_qimage(img_data, filename=None):
     image = QtGui.QImage.fromData(img_data)
     if not image.isNull():

@@ -418,6 +418,17 @@ class LabelingWidget(LabelDialog):
         )
         self.canvas.zoom_request.connect(self.zoom_request)
 
+        # Multi-layer (depth/reflectance/other) channel view state.
+        self.channel_img = None
+        self._has_channels = False
+        self._main_channel = None  # None = Original RGB, else band index 0/1/2
+        self._compare_channel = 1
+        self._side_by_side = False
+        self._main_channel_actions = []
+        self._compare_channel_actions = []
+        self._channel_original_action = None
+        self._channel_side_by_side_action = None
+
         # Compare view support
         self.compare_view_manager = CompareViewManager(self.canvas, self)
         self.compare_view_manager.status_message.connect(self.status)
@@ -643,6 +654,72 @@ class LabelingWidget(LabelDialog):
             self.tr("Toggle split-screen compare view"),
             enabled=True,
         )
+
+        # --- Multi-layer channel display (depth/reflectance/other) ---
+        # BGR band order matches extract_channel.py:
+        #   0 = depth, 1 = reflectance, 2 = other feature.
+        self._channel_names = (
+            self.tr("Depth"),
+            self.tr("Reflectance"),
+            self.tr("Other Feature"),
+        )
+        self._channel_menu = QtWidgets.QMenu(self.tr("Channel"), self)
+        self._main_channel_group = QtGui.QActionGroup(self)
+        self._main_channel_group.setExclusive(True)
+        self._channel_original_action = action(
+            self.tr("Original"),
+            lambda _=False: self.set_main_channel(None),
+            checkable=True,
+            checked=True,
+            enabled=False,
+            tip=self.tr("Show the full RGB composite"),
+        )
+        self._main_channel_group.addAction(self._channel_original_action)
+        self._channel_menu.addAction(self._channel_original_action)
+        self._channel_menu.addSeparator()
+        self._main_channel_actions = []
+        for i, name in enumerate(self._channel_names):
+            channel_action = action(
+                self.tr(name),
+                lambda _=False, idx=i: self.set_main_channel(idx),
+                checkable=True,
+                checked=False,
+                enabled=False,
+                tip=self.tr("Show channel %d (%s) as grayscale") % (i + 1, name),
+            )
+            self._main_channel_group.addAction(channel_action)
+            self._channel_menu.addAction(channel_action)
+            self._main_channel_actions.append(channel_action)
+        self._channel_menu.addSeparator()
+        self._channel_side_by_side_action = action(
+            self.tr("Show side-by-side"),
+            self.toggle_side_by_side,
+            checkable=True,
+            checked=False,
+            enabled=False,
+            tip=self.tr(
+                "Split the view to show the primary and second channels together"
+            ),
+        )
+        self._channel_menu.addAction(self._channel_side_by_side_action)
+        self._channel_compare_menu = self._channel_menu.addMenu(
+            self.tr("Second Channel")
+        )
+        self._compare_channel_group = QtGui.QActionGroup(self)
+        self._compare_channel_group.setExclusive(True)
+        self._compare_channel_actions = []
+        for i, name in enumerate(self._channel_names):
+            compare_action = action(
+                self.tr(name),
+                lambda _=False, idx=i: self.set_compare_channel(idx),
+                checkable=True,
+                checked=(i == 1),
+                enabled=False,
+                tip=self.tr("Show channel %d (%s) on the right half") % (i + 1, name),
+            )
+            self._compare_channel_group.addAction(compare_action)
+            self._channel_compare_menu.addAction(compare_action)
+            self._compare_channel_actions.append(compare_action)
 
         change_output_dir = action(
             self.tr("Change Output Dir"),
@@ -2170,6 +2247,8 @@ class LabelingWidget(LabelDialog):
                 brightness_contrast,
                 set_cross_line,
                 None,
+                self._channel_menu,
+                None,
                 show_masks,
                 show_texts,
                 show_labels,
@@ -2982,6 +3061,17 @@ class LabelingWidget(LabelDialog):
         else:
             self.actions.shape_manager.setEnabled(False)
 
+        # Multi-layer channel controls depend on a loaded multi-band image.
+        enabled = value and self._has_channels
+        for act in self._main_channel_actions:
+            act.setEnabled(enabled)
+        for act in self._compare_channel_actions:
+            act.setEnabled(enabled)
+        if self._channel_original_action is not None:
+            self._channel_original_action.setEnabled(enabled)
+        if self._channel_side_by_side_action is not None:
+            self._channel_side_by_side_action.setEnabled(enabled)
+
     def queue_event(self, function):
         QtCore.QTimer.singleShot(0, function)
 
@@ -2999,6 +3089,13 @@ class LabelingWidget(LabelDialog):
         self.other_data = {}
         self.canvas.reset_state()
         self.brightness_contrast_dialog.clear_image()
+        self.channel_img = None
+        self._has_channels = False
+        self._main_channel = None
+        self._side_by_side = False
+        self._sync_channel_action_states()
+        if hasattr(self, "compare_view_slider"):
+            self.compare_view_slider.hide_slider()
         if hasattr(self, "canvas_adjustment"):
             self.canvas_adjustment.hide()
         self.compare_view_manager.reset()
@@ -5695,6 +5792,134 @@ class LabelingWidget(LabelDialog):
             QtGui.QPixmap.fromImage(qimage), clear_shapes=False
         )
 
+    def _parse_channels(self, filename):
+        """Detect a multi-band (depth/reflectance/other) source and cache it.
+
+        BGR band order matches ``extract_channel.py``: band 0 = depth,
+        band 1 = reflectance, band 2 = other feature.
+        """
+        self.channel_img = None
+        self._has_channels = False
+        if not filename or not QtCore.QFile.exists(filename):
+            return
+        try:
+            arr = cv2.imread(filename, cv2.IMREAD_COLOR)
+            if arr is not None and arr.ndim == 3 and arr.shape[2] >= 3:
+                self.channel_img = arr
+                self._has_channels = True
+        except Exception:
+            self.channel_img = None
+            self._has_channels = False
+
+    def _apply_channel_view(self):
+        """Render the selected channel(s) onto the canvas.
+
+        The background pixmap becomes the chosen single band (as grayscale) or
+        the original RGB composite. When side-by-side is enabled a second band
+        is drawn on the right half (reusing ``canvas.compare_pixmap``). Existing
+        shapes/labels are preserved.
+        """
+        if self.filename is None or self.image_data is None:
+            return
+
+        if self._has_channels and self._main_channel is not None:
+            base_pil = utils.band_to_pil(self.channel_img, self._main_channel)
+            base_qimage = utils.band_to_qimage(
+                self.channel_img, self._main_channel
+            )
+            if base_pil is None:
+                return
+        else:
+            base_pil = utils.img_data_to_pil(self.image_data)
+            base_qimage = utils.img_data_to_qimage(
+                self.image_data, self.filename
+            )
+
+        self.image = base_qimage
+
+        # Side-by-side: render the secondary channel on the right half.
+        if (
+            self._side_by_side
+            and self._has_channels
+            and self._main_channel is not None
+        ):
+            compare_qimage = utils.band_to_qimage(
+                self.channel_img, self._compare_channel
+            )
+            self.canvas.compare_pixmap = QtGui.QPixmap.fromImage(compare_qimage)
+        else:
+            self.canvas.compare_pixmap = None
+
+        # Refresh the navigator preview.
+        if (
+            hasattr(self, "navigator_dialog")
+            and self.navigator_dialog.isVisible()
+        ):
+            self.navigator_dialog.set_image(QtGui.QPixmap.fromImage(base_qimage))
+            self.update_navigator_shapes()
+
+        # Refresh the brightness/contrast source and re-apply stored values so
+        # the adjustment sliders keep working on the active channel.
+        self.brightness_contrast_dialog.update_image(base_pil)
+        brightness, contrast = self.brightness_contrast_values.get(
+            self.filename, (None, None)
+        )
+        b = brightness if brightness is not None else 50
+        c = contrast if contrast is not None else 50
+        self.brightness_contrast_dialog.set_values(b, c)
+        self.brightness_contrast_dialog.on_new_value()
+        self.canvas_adjustment.set_brightness_contrast(b, c)
+        self.paint_canvas()
+
+    def set_main_channel(self, index):
+        """Switch the primary displayed channel (None = Original RGB)."""
+        self._main_channel = index
+        self._sync_channel_action_states()
+        if self._has_channels:
+            self._apply_channel_view()
+        if self._main_channel is not None and self._side_by_side:
+            self.compare_view_slider.show_slider()
+        elif self._side_by_side:
+            self.compare_view_slider.hide_slider()
+        self.status(
+            self.tr(
+                "Viewing %s"
+                % (
+                    self.tr("Original")
+                    if index is None
+                    else self.tr("Channel %d (%s)")
+                    % (index + 1, self._channel_names[index])
+                )
+            ),
+            3000,
+        )
+
+    def set_compare_channel(self, index):
+        """Set the secondary channel for the side-by-side view."""
+        self._compare_channel = index
+        if self._has_channels and self._side_by_side:
+            self._apply_channel_view()
+
+    def toggle_side_by_side(self, checked):
+        """Enable/disable the side-by-side (two-channel) view."""
+        self._side_by_side = bool(checked)
+        if self._main_channel is None and self._has_channels and checked:
+            self.set_main_channel(0)
+            return
+        self._apply_channel_view()
+        if self._main_channel is not None:
+            self.compare_view_slider.show_slider()
+            self.compare_view_slider.set_position(0.5)
+        else:
+            self.compare_view_slider.hide_slider()
+
+    def _sync_channel_action_states(self):
+        """Sync the channel radio actions with the current selection."""
+        if self._channel_original_action is not None:
+            self._channel_original_action.setChecked(self._main_channel is None)
+        for i, act in enumerate(self._main_channel_actions):
+            act.setChecked(self._main_channel == i)
+
     def _on_shape_opacity_changed(self, value):
         """Update label/shape opacity from the slider value (0-100)."""
         self.canvas.shape_opacity = value / 100.0
@@ -5923,6 +6148,7 @@ class LabelingWidget(LabelDialog):
             return False
         self.image = image
         self.filename = filename
+        self._parse_channels(filename)
 
         if (
             hasattr(self, "navigator_dialog")
@@ -6025,6 +6251,17 @@ class LabelingWidget(LabelDialog):
         # Reveal the adjustment panel now that an image is loaded.
         self.canvas_adjustment.show()
         self._position_canvas_adjustment()
+
+        # Re-apply the active channel view (re-renders the canvas pixmap and
+        # keeps any labels/shapes in place).
+        if not self._has_channels:
+            self._main_channel = None
+            self._side_by_side = False
+            self._sync_channel_action_states()
+            self.canvas.compare_pixmap = None
+            self.compare_view_slider.hide_slider()
+        elif self._main_channel is not None:
+            self._apply_channel_view()
 
         if self.compare_view_manager.is_active():
             self.compare_view_manager.load_compare_for_file(self.filename)
@@ -6386,6 +6623,14 @@ class LabelingWidget(LabelDialog):
 
     def close_compare_view(self, confirm=True):
         """Close the compare view."""
+        # If only the channel side-by-side mode is active (no external compare
+        # directory), closing simply disables it without a confirmation dialog.
+        if self._side_by_side and not self.compare_view_manager.is_active():
+            self._side_by_side = False
+            self._channel_side_by_side_action.setChecked(False)
+            self._apply_channel_view()
+            self.compare_view_slider.hide_slider()
+            return
         if confirm:
             reply = QtWidgets.QMessageBox.question(
                 self,

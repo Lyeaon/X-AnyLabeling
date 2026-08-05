@@ -22,6 +22,9 @@ from .general import (
     find_most_similar_label,
 )
 from .image import (
+    band_to_array,
+    band_to_pil,
+    band_to_qimage,
     check_img_exif,
     ensure_pillow_heif_registered,
     get_pil_img_dim,
