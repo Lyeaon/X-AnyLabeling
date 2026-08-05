@@ -342,6 +342,15 @@ class Canvas(
         if value not in Shape.get_supported_shape():
             raise ValueError(f"Unsupported create_mode: {value}")
         self._create_mode = value
+        self._update_cursor()
+        self.update()
+
+    def _update_cursor(self):
+        """Update cursor based on current mode"""
+        if self.mode == self.CREATE:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def store_shapes(self):
         """Store shapes for restoring later (Undo feature)"""
@@ -1300,6 +1309,8 @@ class Canvas(
             self.deselect_shape()
             self.is_move_editing = False
             self.shape_hover_changed.emit()
+        self._update_cursor()
+        self.update()
 
     def un_highlight(self):
         """Unhighlight shape/vertex/edge"""
@@ -1843,6 +1854,7 @@ class Canvas(
             elif self.create_mode == "rectangle":
                 self.line.points = [self.current[0], pos]
                 self.line.close()
+                self.repaint()
             elif self.create_mode == "rotation":
                 self.line[1] = pos
                 self.line.line_color = color

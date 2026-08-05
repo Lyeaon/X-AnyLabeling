@@ -422,9 +422,10 @@ class LabelingWidget(LabelDialog):
         # Multi-layer (depth/reflectance/other) channel view state.
         self.channel_img = None
         self._has_channels = False
-        self._main_channel = None  # None = Original RGB, else band index 0/1/2
-        self._compare_channel = 1
-        self._side_by_side = False
+        # Load channel view settings from config
+        self._main_channel = self._config.get("channel_view_main_channel")
+        self._compare_channel = self._config.get("channel_view_compare_channel", 1)
+        self._side_by_side = self._config.get("channel_view_side_by_side", False)
         self._last_input_canvas = None
         self._mirror_source = None
         self._mirror_target = None
@@ -736,6 +737,19 @@ class LabelingWidget(LabelDialog):
         self._compare_channel_group = QtGui.QActionGroup(self)
         self._compare_channel_group.setExclusive(True)
         self._compare_channel_actions = []
+
+        # Add "Original" option for compare channel (like main channel)
+        self._compare_channel_original_action = action(
+            self.tr("Original"),
+            lambda _=False: self.set_compare_channel(None),
+            checkable=True,
+            checked=False,
+            enabled=False,
+            tip=self.tr("Show original RGB image in the second view"),
+        )
+        self._compare_channel_group.addAction(self._compare_channel_original_action)
+        self._channel_compare_menu.addAction(self._compare_channel_original_action)
+
         for i, name in enumerate(self._channel_names):
             compare_action = action(
                 self.tr(name),
@@ -3125,6 +3139,7 @@ class LabelingWidget(LabelDialog):
         self.channel_img = None
         self._has_channels = False
         self._main_channel = None
+        self._compare_channel = 1
         self._side_by_side = False
         if hasattr(self, "_channel_scroll_area"):
             self._channel_scroll_area.hide()
@@ -3753,6 +3768,10 @@ class LabelingWidget(LabelDialog):
             self.channel_canvas.set_editing(edit)
             self.channel_canvas.create_mode = create_mode
             self.channel_canvas._brush_drawing = False
+        # Force canvas update to reflect mode change immediately
+        self.canvas.update()
+        if hasattr(self, "channel_canvas"):
+            self.channel_canvas.update()
         if edit:
             self.actions.create_mode.setEnabled(True)
             self.actions.create_brush_polygon_mode.setEnabled(True)
@@ -5850,7 +5869,11 @@ class LabelingWidget(LabelDialog):
         if self._main_channel is None or self.channel_img is None:
             self.channel_canvas.update()
             return
-        compare_pil = utils.band_to_pil(self.channel_img, self._compare_channel)
+        # Handle Original (None) for compare channel - show original RGB
+        if self._compare_channel is None:
+            compare_pil = utils.img_data_to_pil(self.image_data)
+        else:
+            compare_pil = utils.band_to_pil(self.channel_img, self._compare_channel)
         if compare_pil is None:
             return
         b, c = self._current_bc()
@@ -5974,10 +5997,23 @@ class LabelingWidget(LabelDialog):
         )
 
     def set_compare_channel(self, index):
-        """Set the secondary channel for the side-by-side view."""
+        """Set the secondary channel for the side-by-side view (None = Original)."""
         self._compare_channel = index
+        self._sync_channel_action_states()
         if self._has_channels and self._side_by_side:
             self._refresh_channel_preview_bc()
+        self.status(
+            self.tr(
+                "Compare view: %s"
+                % (
+                    self.tr("Original")
+                    if index is None
+                    else self.tr("Channel %d (%s)")
+                    % (index + 1, self._channel_names[index])
+                )
+            ),
+            3000,
+        )
 
     def toggle_side_by_side(self, checked):
         """Enable/disable the side-by-side (two-channel) view."""
@@ -5995,6 +6031,11 @@ class LabelingWidget(LabelDialog):
             act.setChecked(self._main_channel == i)
         if self._channel_side_by_side_action is not None:
             self._channel_side_by_side_action.setChecked(self._side_by_side)
+        # Sync compare channel actions
+        if self._compare_channel_original_action is not None:
+            self._compare_channel_original_action.setChecked(self._compare_channel is None)
+        for i, act in enumerate(self._compare_channel_actions):
+            act.setChecked(self._compare_channel == i)
 
     # --- Shared shapes model / live sync helpers ---
 
@@ -6454,6 +6495,11 @@ class LabelingWidget(LabelDialog):
             self.file_list_widget.update()
             return False
 
+        # Save current channel view settings to restore after loading new image
+        prev_main_channel = self._main_channel
+        prev_compare_channel = self._compare_channel
+        prev_side_by_side = self._side_by_side
+
         self.reset_state()
         self.canvas.setEnabled(False)
 
@@ -6534,6 +6580,16 @@ class LabelingWidget(LabelDialog):
         self.image = image
         self.filename = filename
         self._parse_channels(filename)
+
+        # Restore channel view settings if the new image has channels
+        if self._has_channels:
+            self._main_channel = prev_main_channel
+            self._compare_channel = prev_compare_channel
+            self._side_by_side = prev_side_by_side
+        else:
+            self._main_channel = None
+            self._compare_channel = 1
+            self._side_by_side = False
 
         if (
             hasattr(self, "navigator_dialog")
@@ -6646,8 +6702,18 @@ class LabelingWidget(LabelDialog):
             if hasattr(self, "_channel_scroll_area"):
                 self._channel_scroll_area.hide()
             self.compare_view_slider.hide_slider()
-        elif self._main_channel is not None:
-            self._apply_channel_view()
+        else:
+            # Restore side-by-side view if it was enabled
+            if self._side_by_side:
+                self._apply_channel_view()
+            elif self._main_channel is not None:
+                self._apply_channel_view()
+
+        # Save channel view settings to config for persistence across sessions
+        self._config["channel_view_main_channel"] = self._main_channel
+        self._config["channel_view_compare_channel"] = self._compare_channel
+        self._config["channel_view_side_by_side"] = self._side_by_side
+        save_config(self._config)
 
         if self.compare_view_manager.is_active():
             self.compare_view_manager.load_compare_for_file(self.filename)

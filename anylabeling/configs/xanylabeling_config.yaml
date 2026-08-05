@@ -10,6 +10,10 @@ keep_prev: false
 keep_prev_scale: false
 keep_prev_brightness: false
 keep_prev_contrast: false
+# Channel view settings
+channel_view_main_channel: null  # null = Original RGB, 0/1/2 for channels
+channel_view_side_by_side: false
+channel_view_compare_channel: 1  # null = Original RGB, 0/1/2 for channels
 auto_use_last_label: false
 auto_use_last_gid: false
 auto_highlight_shape: true
