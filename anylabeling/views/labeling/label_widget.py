@@ -396,7 +396,7 @@ class LabelingWidget(LabelDialog):
 
         self.setAcceptDrops(True)
 
-        self.canvas = self.label_list.canvas = Canvas(
+        canvas_kwargs = dict(
             parent=self,
             epsilon=self._config["canvas"]["epsilon"],
             double_click=self._config["canvas"]["double_click"],
@@ -416,6 +416,7 @@ class LabelingWidget(LabelDialog):
                 "double_click_edit_label", True
             ),
         )
+        self.canvas = self.label_list.canvas = Canvas(**canvas_kwargs)
         self.canvas.zoom_request.connect(self.zoom_request)
 
         # Multi-layer (depth/reflectance/other) channel view state.
@@ -424,10 +425,18 @@ class LabelingWidget(LabelDialog):
         self._main_channel = None  # None = Original RGB, else band index 0/1/2
         self._compare_channel = 1
         self._side_by_side = False
+        self._last_input_canvas = None
+        self._mirror_source = None
+        self._mirror_target = None
         self._main_channel_actions = []
         self._compare_channel_actions = []
         self._channel_original_action = None
         self._channel_side_by_side_action = None
+
+        # Second, fully-interactive canvas used for the side-by-side channel
+        # view. It shares the same shapes model as ``self.canvas`` and mirrors
+        # navigation/selection live.
+        self.channel_canvas = Canvas(**canvas_kwargs)
 
         # Compare view support
         self.compare_view_manager = CompareViewManager(self.canvas, self)
@@ -450,6 +459,25 @@ class LabelingWidget(LabelDialog):
         scroll_area.setWidget(self.canvas)
         scroll_area.setWidgetResizable(True)
         self._canvas_scroll_area = scroll_area
+
+        # Second canvas lives in its own scroll area (shown only when the
+        # side-by-side channel view is enabled).
+        self._channel_scroll_area = QScrollArea()
+        self._channel_scroll_area.setWidget(self.channel_canvas)
+        self._channel_scroll_area.setWidgetResizable(True)
+        self._channel_scroll_area.hide()
+        self._channel_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+        self._channel_splitter = QtWidgets.QSplitter(
+            Qt.Orientation.Horizontal
+        )
+        self._channel_splitter.setObjectName("channel_splitter")
+        self._channel_splitter.setChildrenCollapsible(False)
+        self._channel_splitter.addWidget(scroll_area)
+        self._channel_splitter.addWidget(self._channel_scroll_area)
+        self._channel_splitter.setSizes([1, 1])
+
+        self.channel_canvas.scale = self.canvas.scale
 
         # Adjustment panel docked at the bottom-left of the canvas viewport.
         self.canvas_adjustment = CanvasAdjustmentWidget(scroll_area.viewport())
@@ -2411,7 +2439,7 @@ class LabelingWidget(LabelDialog):
         central_layout.addWidget(self.label_instruction)
         central_layout.addSpacing(5)
         central_layout.addWidget(self.auto_labeling_widget)
-        central_layout.addWidget(scroll_area)
+        central_layout.addWidget(self._channel_splitter, 1)
         central_layout.addWidget(self.compare_view_slider)
         layout.addLayout(central_layout)
 
@@ -2594,6 +2622,8 @@ class LabelingWidget(LabelDialog):
 
         layout.addLayout(right_sidebar_layout)
         self.setLayout(layout)
+
+        self._setup_channel_sync()
 
         if output_file is not None and self._config["auto_save"]:
             logger.warning(
@@ -3088,11 +3118,16 @@ class LabelingWidget(LabelDialog):
         self.label_file = None
         self.other_data = {}
         self.canvas.reset_state()
+        if hasattr(self, "channel_canvas"):
+            self.channel_canvas.reset_state()
+        self._last_input_canvas = None
         self.brightness_contrast_dialog.clear_image()
         self.channel_img = None
         self._has_channels = False
         self._main_channel = None
         self._side_by_side = False
+        if hasattr(self, "_channel_scroll_area"):
+            self._channel_scroll_area.hide()
         self._sync_channel_action_states()
         if hasattr(self, "compare_view_slider"):
             self.compare_view_slider.hide_slider()
@@ -3713,6 +3748,11 @@ class LabelingWidget(LabelDialog):
         self.canvas.set_editing(edit)
         self.canvas.create_mode = create_mode
         self.canvas._brush_drawing = False
+        # Keep the side-by-side canvas in the same mode/create-mode.
+        if hasattr(self, "channel_canvas"):
+            self.channel_canvas.set_editing(edit)
+            self.channel_canvas.create_mode = create_mode
+            self.channel_canvas._brush_drawing = False
         if edit:
             self.actions.create_mode.setEnabled(True)
             self.actions.create_brush_polygon_mode.setEnabled(True)
@@ -3813,11 +3853,15 @@ class LabelingWidget(LabelDialog):
             self.toggle_draw_mode(True, preserve_brush_mode=True)
             self.set_text_editing(True)
             self.canvas.set_brush_mode(True)
+            if hasattr(self, "channel_canvas"):
+                self.channel_canvas.set_brush_mode(True)
             self.update_labeling_instruction()
             return
 
         if getattr(self.canvas, "is_brush_mode", False):
             self.canvas.set_brush_mode(False)
+            if hasattr(self, "channel_canvas"):
+                self.channel_canvas.set_brush_mode(False)
         self.update_labeling_instruction()
 
     def on_brush_mode_changed(self, enabled: bool) -> None:
@@ -4828,6 +4872,8 @@ class LabelingWidget(LabelDialog):
             shape.selected = False
         self.label_list.clearSelection()
         self.canvas.selected_shapes = selected_shapes
+        if hasattr(self, "channel_canvas"):
+            self.channel_canvas.selected_shapes = selected_shapes
         allow_merge_shape_type = {"rectangle": 0, "polygon": 0}
         for shape in self.canvas.selected_shapes:
             shape.selected = True
@@ -5018,6 +5064,7 @@ class LabelingWidget(LabelDialog):
             self.label_list.setUpdatesEnabled(True)
             self._no_selection_slot = False
         self.canvas.load_shapes(shapes, replace=replace)
+        self._repoint_shapes()
         self._refresh_shape_filters()
 
     def load_flags(self, flags):
@@ -5302,11 +5349,12 @@ class LabelingWidget(LabelDialog):
         self.canvas.load_shapes([item.shape() for item in self.label_list])
 
     # Callback functions:
-    def new_shape(self):
+    def new_shape(self, canvas=None):
         """Pop-up and give focus to the label editor.
 
         position MUST be in global coordinates.
         """
+        canvas = canvas or self.canvas
         items = self.unique_label_list.selectedItems()
         text = None
         if items:
@@ -5387,11 +5435,11 @@ class LabelingWidget(LabelDialog):
             self.actions.undo.setEnabled(True)
             self.set_dirty()
             if (
-                self.canvas.drawing()
-                and self.canvas.create_mode == "polygon"
+                canvas.drawing()
+                and canvas.create_mode == "polygon"
                 and not self.actions.create_brush_polygon_mode.isEnabled()
             ):
-                self.canvas._brush_drawing = True
+                canvas._brush_drawing = True
 
             if self.attributes and text in self.attributes:
                 shape.selected = True
@@ -5402,8 +5450,9 @@ class LabelingWidget(LabelDialog):
                         self.update_attributes(i)
                         break
         else:
-            self.canvas.undo_last_line()
-            self.canvas.shapes_backups.pop()
+            canvas.undo_last_line()
+            if canvas.shapes_backups:
+                canvas.shapes_backups.pop()
 
     def show_shape(self, shape_height, shape_width, pos):
         """Display annotation width and height while hovering inside.
@@ -5791,6 +5840,46 @@ class LabelingWidget(LabelDialog):
         self.canvas.load_pixmap(
             QtGui.QPixmap.fromImage(qimage), clear_shapes=False
         )
+        # Keep the side-by-side channel canvas in sync with the same BC.
+        self._refresh_channel_preview_bc()
+
+    def _refresh_channel_preview_bc(self):
+        """Re-render the second channel canvas using the current BC values."""
+        if not (self._side_by_side and self._has_channels):
+            return
+        if self._main_channel is None or self.channel_img is None:
+            self.channel_canvas.update()
+            return
+        compare_pil = utils.band_to_pil(self.channel_img, self._compare_channel)
+        if compare_pil is None:
+            return
+        b, c = self._current_bc()
+        qimage = self._enhance_pil(compare_pil, b, c)
+        self.channel_canvas.load_pixmap(
+            QtGui.QPixmap.fromImage(qimage), clear_shapes=False
+        )
+
+    def _current_bc(self):
+        """Return the stored brightness/contrast slider values (0-150)."""
+        brightness, contrast = self.brightness_contrast_values.get(
+            self.filename, (None, None)
+        )
+        b = brightness if brightness is not None else 50
+        c = contrast if contrast is not None else 50
+        return b, c
+
+    def _enhance_pil(self, pil_img, b_slider, c_slider):
+        """Apply brightness/contrast factors (slider 0-150) and return a QImage."""
+        b = b_slider / 50.0
+        c = c_slider / 50.0
+        from PIL import ImageEnhance
+
+        img = pil_img
+        if b != 1:
+            img = ImageEnhance.Brightness(img).enhance(b)
+        if c != 1:
+            img = ImageEnhance.Contrast(img).enhance(c)
+        return utils.pil_to_qimage(img)
 
     def _parse_channels(self, filename):
         """Detect a multi-band (depth/reflectance/other) source and cache it.
@@ -5812,62 +5901,56 @@ class LabelingWidget(LabelDialog):
             self._has_channels = False
 
     def _apply_channel_view(self):
-        """Render the selected channel(s) onto the canvas.
+        """Render the selected channel(s) onto the main and second canvases.
 
-        The background pixmap becomes the chosen single band (as grayscale) or
-        the original RGB composite. When side-by-side is enabled a second band
-        is drawn on the right half (reusing ``canvas.compare_pixmap``). Existing
-        shapes/labels are preserved.
+        The main canvas shows the chosen single band (or Original RGB), the
+        second canvas (side-by-side) shows another band. Existing labels/shapes
+        are preserved.
         """
         if self.filename is None or self.image_data is None:
             return
 
         if self._has_channels and self._main_channel is not None:
-            base_pil = utils.band_to_pil(self.channel_img, self._main_channel)
-            base_qimage = utils.band_to_qimage(
-                self.channel_img, self._main_channel
-            )
-            if base_pil is None:
+            main_pil = utils.band_to_pil(self.channel_img, self._main_channel)
+            if main_pil is None:
                 return
         else:
-            base_pil = utils.img_data_to_pil(self.image_data)
-            base_qimage = utils.img_data_to_qimage(
-                self.image_data, self.filename
-            )
+            main_pil = utils.img_data_to_pil(self.image_data)
 
-        self.image = base_qimage
+        b, c = self._current_bc()
+        main_qimage = self._enhance_pil(main_pil, b, c)
+        self.image = main_qimage
+        self.canvas.load_pixmap(
+            QtGui.QPixmap.fromImage(main_qimage), clear_shapes=False
+        )
 
-        # Side-by-side: render the secondary channel on the right half.
         if (
             self._side_by_side
             and self._has_channels
             and self._main_channel is not None
         ):
-            compare_qimage = utils.band_to_qimage(
-                self.channel_img, self._compare_channel
-            )
-            self.canvas.compare_pixmap = QtGui.QPixmap.fromImage(compare_qimage)
+            self._channel_scroll_area.show()
+            if self._channel_splitter.sizes()[1] == 0:
+                self._channel_splitter.setSizes([1, 1])
+            self._refresh_channel_preview_bc()
+            self.channel_live_timer.start()
         else:
-            self.canvas.compare_pixmap = None
+            self._channel_scroll_area.hide()
+            self.channel_live_timer.stop()
+
+        self._repoint_shapes()
+        self._sync_navigation_to_channel()
 
         # Refresh the navigator preview.
         if (
             hasattr(self, "navigator_dialog")
             and self.navigator_dialog.isVisible()
         ):
-            self.navigator_dialog.set_image(QtGui.QPixmap.fromImage(base_qimage))
+            self.navigator_dialog.set_image(QtGui.QPixmap.fromImage(main_qimage))
             self.update_navigator_shapes()
 
-        # Refresh the brightness/contrast source and re-apply stored values so
-        # the adjustment sliders keep working on the active channel.
-        self.brightness_contrast_dialog.update_image(base_pil)
-        brightness, contrast = self.brightness_contrast_values.get(
-            self.filename, (None, None)
-        )
-        b = brightness if brightness is not None else 50
-        c = contrast if contrast is not None else 50
-        self.brightness_contrast_dialog.set_values(b, c)
-        self.brightness_contrast_dialog.on_new_value()
+        # Refresh the brightness/contrast source for future slider edits.
+        self.brightness_contrast_dialog.update_image(main_pil)
         self.canvas_adjustment.set_brightness_contrast(b, c)
         self.paint_canvas()
 
@@ -5877,10 +5960,6 @@ class LabelingWidget(LabelDialog):
         self._sync_channel_action_states()
         if self._has_channels:
             self._apply_channel_view()
-        if self._main_channel is not None and self._side_by_side:
-            self.compare_view_slider.show_slider()
-        elif self._side_by_side:
-            self.compare_view_slider.hide_slider()
         self.status(
             self.tr(
                 "Viewing %s"
@@ -5898,20 +5977,15 @@ class LabelingWidget(LabelDialog):
         """Set the secondary channel for the side-by-side view."""
         self._compare_channel = index
         if self._has_channels and self._side_by_side:
-            self._apply_channel_view()
+            self._refresh_channel_preview_bc()
 
     def toggle_side_by_side(self, checked):
         """Enable/disable the side-by-side (two-channel) view."""
         self._side_by_side = bool(checked)
         if self._main_channel is None and self._has_channels and checked:
-            self.set_main_channel(0)
-            return
+            self._main_channel = 0
+            self._sync_channel_action_states()
         self._apply_channel_view()
-        if self._main_channel is not None:
-            self.compare_view_slider.show_slider()
-            self.compare_view_slider.set_position(0.5)
-        else:
-            self.compare_view_slider.hide_slider()
 
     def _sync_channel_action_states(self):
         """Sync the channel radio actions with the current selection."""
@@ -5919,6 +5993,303 @@ class LabelingWidget(LabelDialog):
             self._channel_original_action.setChecked(self._main_channel is None)
         for i, act in enumerate(self._main_channel_actions):
             act.setChecked(self._main_channel == i)
+        if self._channel_side_by_side_action is not None:
+            self._channel_side_by_side_action.setChecked(self._side_by_side)
+
+    # --- Shared shapes model / live sync helpers ---
+
+    def _repoint_shapes(self):
+        """Ensure both canvases reference the same shapes model."""
+        if not hasattr(self, "channel_canvas"):
+            return
+        self.channel_canvas.shapes = self.canvas.shapes
+        self.channel_canvas.selected_shapes = getattr(
+            self.canvas, "selected_shapes", []
+        )
+
+    def _mirror_transient(self, src, dst):
+        """Copy editing / transient state from ``src`` canvas to ``dst``."""
+        dst.shapes = src.shapes
+        dst.selected_shapes = src.selected_shapes
+        for attr in (
+            "current",
+            "h_shape",
+            "h_vertex",
+            "h_edge",
+            "h_cuboid_face",
+            "offsets",
+            "mode",
+            "create_mode",
+            "moving_shape",
+            "line",
+            "is_brush_mode",
+            "_selected_group_id",
+            "_hovered_group_id",
+        ):
+            value = getattr(src, attr, None)
+            # ``offsets`` must stay a 2-tuple: canvas move code reads
+            # ``self.offsets[0]`` unguarded.
+            if attr == "offsets" and not isinstance(value, tuple):
+                value = (QtCore.QPointF(), QtCore.QPointF())
+            setattr(dst, attr, value)
+        self._mirror_source = src
+        self._mirror_target = dst
+        dst.update()
+
+    def _active_editing_canvas(self):
+        """Return the canvas currently owning an active edit gesture, if any.
+
+        Prefers the canvas that actually received the last mouse input so the
+        live-sync direction stays deterministic even while transient state
+        (``moving_shape``, ``offsets``, ...) is mirrored onto the peer canvas.
+        """
+        candidates = (self.canvas, getattr(self, "channel_canvas", None))
+        last = getattr(self, "_last_input_canvas", None)
+        if last is not None and last in candidates:
+            if self._canvas_is_editing(last):
+                return last
+            # The input canvas is idle, so any editing flags left on the peer
+            # canvas are stale mirrors from a finished gesture, not a live one.
+            return None
+        # No mouse input tracked yet: fall back to scanning (programmatic).
+        for c in candidates:
+            if c is not None and self._canvas_is_editing(c):
+                return c
+        return None
+
+    def _canvas_is_editing(self, canvas):
+        """Return whether ``canvas`` is in the middle of an edit gesture."""
+        return (
+            getattr(canvas, "current", None) is not None
+            or getattr(canvas, "moving_shape", False)
+            or getattr(canvas, "is_move_editing", False)
+            or getattr(canvas, "_brush_drawing", False)
+        )
+
+    def _canvas_has_transient(self, canvas):
+        """Return whether ``canvas`` holds leftover transient render state."""
+        for attr in (
+            "current",
+            "h_shape",
+            "h_vertex",
+            "h_edge",
+            "h_cuboid_face",
+            "moving_shape",
+            "rotating_shape",
+            "is_move_editing",
+            "_brush_drawing",
+            "_selected_group_id",
+            "_hovered_group_id",
+            "line",
+            "is_brush_mode",
+        ):
+            if getattr(canvas, attr, None):
+                return True
+        return False
+
+    def _clear_transient_flags(self, canvas):
+        """Reset rendering/activity flags left over from a finished gesture."""
+        for attr in (
+            "current",
+            "h_shape",
+            "h_vertex",
+            "h_edge",
+            "h_cuboid_face",
+            "_selected_group_id",
+            "_hovered_group_id",
+        ):
+            setattr(canvas, attr, None)
+        # ``offsets`` defaults to a 2-tuple; move code reads ``offsets[0]``
+        # unguarded, so restore the default rather than None.
+        canvas.offsets = (QtCore.QPointF(), QtCore.QPointF())
+        # ``line`` defaults to a Shape(); reset to avoid stale rubber-band.
+        canvas.line = Shape()
+        # ``is_brush_mode`` defaults to False.
+        canvas.is_brush_mode = False
+        for attr in (
+            "moving_shape",
+            "rotating_shape",
+            "is_move_editing",
+            "_brush_drawing",
+        ):
+            if hasattr(canvas, attr):
+                setattr(canvas, attr, False)
+        canvas.update()
+
+    def _clear_stale_mirrors(self):
+        """Drop transient flags that a finished gesture left on the peer."""
+        # Re-point the channel canvas to the authoritative selection list in
+        # case a canvas-side reassignment (delete/brush) broke the shared
+        # reference while no gesture is active.
+        if hasattr(self, "channel_canvas") and getattr(
+            self.canvas, "selected_shapes", None
+        ) is not getattr(self.channel_canvas, "selected_shapes", None):
+            self.channel_canvas.selected_shapes = self.canvas.selected_shapes
+        target = getattr(self, "_mirror_target", None)
+        source = getattr(self, "_mirror_source", None)
+        if target is None:
+            return
+        if source is not None and self._canvas_is_editing(source):
+            return  # source gesture still running; keep mirroring
+        if self._canvas_has_transient(target):
+            self._clear_transient_flags(target)
+        self._mirror_source = None
+        self._mirror_target = None
+
+    def _channel_sync_tick(self):
+        """Live during-drag sync: mirror the active canvas's state to its peer."""
+        if not (self._side_by_side and self._has_channels):
+            self.channel_live_timer.stop()
+            return
+        src = self._active_editing_canvas()
+        if src is None:
+            self._clear_stale_mirrors()
+            return
+        dst = self.channel_canvas if src is self.canvas else self.canvas
+        self._mirror_transient(src, dst)
+        self._sync_navigation_to_channel()
+
+    def _mirror_main_to_channel(self, *args, **kwargs):
+        """Mirror main-canvas changes onto the second canvas."""
+        if not (self._side_by_side and self._has_channels):
+            return
+        self._mirror_transient(self.canvas, self.channel_canvas)
+
+    def _channel_new_shape(self):
+        self._mirror_transient(self.channel_canvas, self.canvas)
+        self.new_shape(self.channel_canvas)
+
+    def _channel_shape_changed(self):
+        self._mirror_transient(self.channel_canvas, self.canvas)
+        self.set_dirty()
+
+    def _channel_shapes_deleted(self, shapes):
+        self._mirror_transient(self.channel_canvas, self.canvas)
+        self.on_canvas_shapes_deleted(shapes)
+
+    def _channel_selection_changed(self, selected):
+        self._mirror_transient(self.channel_canvas, self.canvas)
+        self.shape_selection_changed(selected)
+
+    def _channel_brush_history(self, can_undo):
+        if hasattr(self.actions, "undo"):
+            self.actions.undo.setEnabled(can_undo)
+
+    def _channel_drawing_polygon(self, drawing):
+        self._mirror_transient(self.channel_canvas, self.canvas)
+
+    def _sync_navigation_to_channel(self):
+        """Copy scale/adjustSize from main to the second canvas."""
+        if not hasattr(self, "channel_canvas"):
+            return
+        if not self._side_by_side:
+            return
+        self.channel_canvas.scale = self.canvas.scale
+        self.channel_canvas.adjustSize()
+        self.channel_canvas.update()
+        # Re-apply main's scroll position once the channel scroll area has had
+        # a chance to re-layout: its scrollbar ranges only refresh after the
+        # resize is processed by the event loop, so pushing values too early
+        # clamps the channel to a stale range.
+        QtCore.QTimer.singleShot(0, self._push_scroll_to_channel)
+
+    def _push_scroll_to_channel(self):
+        """Mirror main's scroll positions onto the second canvas."""
+        if not (
+            self._side_by_side
+            and self._has_channels
+            and hasattr(self, "_channel_scroll_area")
+        ):
+            return
+        for orient in (Qt.Orientation.Vertical, Qt.Orientation.Horizontal):
+            src = self.scroll_bars[orient]
+            dst = (
+                self._channel_scroll_area.verticalScrollBar()
+                if orient == Qt.Orientation.Vertical
+                else self._channel_scroll_area.horizontalScrollBar()
+            )
+            if dst.value() != src.value():
+                # Don't block signals: QScrollArea scrolls its viewport through
+                # the scrollbar's ``valueChanged`` connection, so blocking here
+                # would update the value without ever moving the pane. The
+                # feedback loop converges because ``setValue`` with the current
+                # value emits nothing.
+                dst.setValue(src.value())
+
+    def _sync_scroll_from(self, src_bar, orient):
+        """Mirror one scroll bar's position onto the other (bidirectional)."""
+        if not (self._side_by_side and self._has_channels):
+            return
+        other = self.scroll_bars[orient]
+        if src_bar is other:
+            other = self._channel_scroll_area.verticalScrollBar(
+            ) if orient == Qt.Orientation.Vertical else (
+                self._channel_scroll_area.horizontalScrollBar()
+            )
+        if other.value() != src_bar.value():
+            # No blockSignals here either: the channel pane must actually
+            # scroll (see _push_scroll_to_channel). The loop converges.
+            other.setValue(src_bar.value())
+
+    def _setup_channel_sync(self):
+        """Wire up signal connections for the second (side-by-side) canvas."""
+        # main canvas -> mirror to second canvas.
+        for sig in (
+            self.canvas.new_shape,
+            self.canvas.shape_moved,
+            self.canvas.shape_rotated,
+            self.canvas.shapes_deleted,
+            self.canvas.selection_changed,
+            self.canvas.drawing_polygon,
+            self.canvas.brush_history_changed,
+        ):
+            sig.connect(self._mirror_main_to_channel)
+
+        # second canvas -> run the normal widget handlers (state is shared).
+        self.channel_canvas.new_shape.connect(self._channel_new_shape)
+        self.channel_canvas.shape_moved.connect(self._channel_shape_changed)
+        self.channel_canvas.shape_rotated.connect(self._channel_shape_changed)
+        self.channel_canvas.shapes_deleted.connect(self._channel_shapes_deleted)
+        self.channel_canvas.selection_changed.connect(
+            self._channel_selection_changed
+        )
+        self.channel_canvas.brush_history_changed.connect(
+            self._channel_brush_history
+        )
+        self.channel_canvas.drawing_polygon.connect(
+            self._channel_drawing_polygon
+        )
+
+        # Second canvas drives the same zoom/scroll handlers (navigation sync).
+        self.channel_canvas.zoom_request.connect(self.zoom_request)
+        self.channel_canvas.scroll_request.connect(self.scroll_request)
+
+        # Bidirectional scroll sync.
+        for orient in (Qt.Orientation.Vertical, Qt.Orientation.Horizontal):
+            self.scroll_bars[orient].valueChanged.connect(
+                lambda _v, o=orient, sb=self.scroll_bars[orient]: (
+                    self._sync_scroll_from(sb, o)
+                )
+            )
+            csb = (
+                self._channel_scroll_area.verticalScrollBar()
+                if orient == Qt.Orientation.Vertical
+                else self._channel_scroll_area.horizontalScrollBar()
+            )
+            csb.valueChanged.connect(
+                lambda _v, o=orient, sb=csb: (self._sync_scroll_from(sb, o))
+            )
+
+        self.channel_live_timer = QtCore.QTimer(self)
+        self.channel_live_timer.setInterval(33)
+        self.channel_live_timer.timeout.connect(self._channel_sync_tick)
+
+        # Track which canvas actually receives mouse input so the live-sync
+        # direction stays deterministic even while transient state
+        # (``moving_shape``, ``offsets``, ...) is mirrored onto the peer canvas.
+        self._last_input_canvas = None
+        self.canvas.installEventFilter(self)
+        self.channel_canvas.installEventFilter(self)
 
     def _on_shape_opacity_changed(self, value):
         """Update label/shape opacity from the slider value (0-100)."""
@@ -5959,6 +6330,20 @@ class LabelingWidget(LabelDialog):
             and event.type() == QtCore.QEvent.Type.Resize
         ):
             self._position_canvas_adjustment()
+        if (
+            event.type()
+            in (
+                QtCore.QEvent.Type.MouseButtonPress,
+                QtCore.QEvent.Type.MouseButtonDblClick,
+                QtCore.QEvent.Type.MouseMove,
+                QtCore.QEvent.Type.MouseButtonRelease,
+            )
+            and (
+                obj is self.canvas
+                or obj is getattr(self, "channel_canvas", None)
+            )
+        ):
+            self._last_input_canvas = obj
         return super().eventFilter(obj, event)
 
     def brightness_contrast(self, _):
@@ -6258,7 +6643,8 @@ class LabelingWidget(LabelDialog):
             self._main_channel = None
             self._side_by_side = False
             self._sync_channel_action_states()
-            self.canvas.compare_pixmap = None
+            if hasattr(self, "_channel_scroll_area"):
+                self._channel_scroll_area.hide()
             self.compare_view_slider.hide_slider()
         elif self._main_channel is not None:
             self._apply_channel_view()
@@ -6295,6 +6681,7 @@ class LabelingWidget(LabelDialog):
         self.canvas.scale = 0.01 * self.zoom_widget.value()
         self.canvas.adjustSize()
         self.canvas.update()
+        self._sync_navigation_to_channel()
         self.update_navigator_viewport()
 
     def adjust_scale(self, initial=False):
