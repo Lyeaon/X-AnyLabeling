@@ -64,7 +64,7 @@ from .utils.file_search import (
     matches_filename,
     matches_label_attribute,
 )
-from .utils.qt import new_icon_path
+from .utils.qt import new_action, new_icon_path
 from .widgets import (
     AboutDialog,
     AutoLabelingWidget,
@@ -762,6 +762,21 @@ class LabelingWidget(LabelDialog):
             self._compare_channel_group.addAction(compare_action)
             self._channel_compare_menu.addAction(compare_action)
             self._compare_channel_actions.append(compare_action)
+
+        self._channel_menu.addSeparator()
+
+        # 3D View action
+        self._channel_3d_action = new_action(
+            self,
+            self.tr("3D View"),
+            self.open_3d_view,
+            shortcuts.get("toggle_3d_view", "Ctrl+3"),
+            "3d",
+            self.tr("Open 3D viewer to visualize depth/reflectance as 3D point cloud"),
+            checkable=False,
+            enabled=False,
+        )
+        self._channel_menu.addAction(self._channel_3d_action)
 
         change_output_dir = action(
             self.tr("Change Output Dir"),
@@ -3115,6 +3130,8 @@ class LabelingWidget(LabelDialog):
             self._channel_original_action.setEnabled(enabled)
         if self._channel_side_by_side_action is not None:
             self._channel_side_by_side_action.setEnabled(enabled)
+        if self._channel_3d_action is not None:
+            self._channel_3d_action.setEnabled(enabled)
 
     def queue_event(self, function):
         QtCore.QTimer.singleShot(0, function)
@@ -5930,7 +5947,8 @@ class LabelingWidget(LabelDialog):
         if not filename or not QtCore.QFile.exists(filename):
             return
         try:
-            arr = cv2.imread(filename, cv2.IMREAD_COLOR)
+            # Use IMREAD_UNCHANGED to preserve bit depth (16-bit, 32-bit float, etc.)
+            arr = cv2.imread(filename, cv2.IMREAD_UNCHANGED)
             if arr is not None and arr.ndim == 3 and arr.shape[2] >= 3:
                 self.channel_img = arr
                 self._has_channels = True
@@ -6030,6 +6048,72 @@ class LabelingWidget(LabelDialog):
             ),
             3000,
         )
+
+    def open_3d_view(self):
+        """Open 3D viewer for depth/reflectance channels."""
+        if not self._has_channels or self.channel_img is None:
+            self.status(self.tr("No channel data available for 3D view"), 3000)
+            return
+
+        try:
+            from .view3d import View3DWindow
+        except ImportError as e:
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.tr("3D View Unavailable"),
+                self.tr("3D view requires Open3D and PyQtGraph. Install with:\n"
+                        "pip install open3d>=0.19.0 pyqtgraph>=0.13.0"),
+            )
+            return
+
+        # Determine which channel to use for 3D geometry (usually depth)
+        # and which for colorization
+        main_channel = self._main_channel
+        depth_channel = None
+        reflectance_channel = None
+        other_channel = None
+
+        if self.channel_img is not None:
+            # Extract individual channels from the image
+            # channel_img channels: 0 = depth, 1 = reflectance, band 2 = other
+            # For depth channel, preserve raw values (don't normalize)
+            depth_channel = self.channel_img[:, :, 0].astype(np.float32)
+            reflectance_channel = self.channel_img[:, :, 1]
+            other_channel = self.channel_img[:, :, 2]
+
+        # Auto-detect depth scale from image statistics
+        depth_scale = self._auto_detect_depth_scale(depth_channel)
+
+        # Open 3D viewer window
+        dialog = View3DWindow(
+            self,
+            depth_channel=depth_channel,
+            reflectance_channel=reflectance_channel,
+            other_channel=other_channel,
+            use_channel="depth",  # Default to depth for geometry
+            focal_length=None,  # Auto-estimate
+            depth_scale=depth_scale,  # Pass depth scale for proper conversion
+            parent_widget=self,
+        )
+        dialog.show()
+
+    def _auto_detect_depth_scale(self, depth_channel: Optional[np.ndarray]) -> float:
+        """Auto-detect depth scale from image statistics.
+        
+        Returns scale factor to convert depth values to meters.
+        Default: 255.0 for 8-bit (0-255 -> 0-1 meters).
+        """
+        if depth_channel is None:
+            return 255.0
+        
+        max_val = float(depth_channel.max())
+        if max_val <= 1.0:
+            return 1.0  # Already normalized 0-1
+        elif max_val <= 255:
+            return 255.0  # 8-bit: 0-255 -> 0-1 meters
+        elif max_val <= 65535:
+            return 1000.0  # 16-bit: assume millimeters
+        return 1.0
 
     def toggle_side_by_side(self, checked):
         """Enable/disable the side-by-side (two-channel) view."""
