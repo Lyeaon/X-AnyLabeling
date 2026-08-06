@@ -6063,6 +6063,13 @@ class LabelingWidget(LabelDialog):
         self.channel_canvas.selected_shapes = getattr(
             self.canvas, "selected_shapes", []
         )
+        # Share the undo/backup stack with the main canvas. Both canvases
+        # operate on the same shapes objects, so the channel canvas must have a
+        # ``shapes_backups`` baseline too: otherwise its move/rotate guards
+        # (canvas.py ``store_moving_shape``/``mouseReleaseEvent``) bail out,
+        # ``shape_moved``/``shape_rotated`` are never emitted, and right-view
+        # edits never reach ``set_dirty()`` (so they are never saved).
+        self.channel_canvas.shapes_backups = self.canvas.shapes_backups
 
     def _sync_visual_settings_to_channel(self) -> None:
         """Sync all visual settings from main canvas to channel canvas.

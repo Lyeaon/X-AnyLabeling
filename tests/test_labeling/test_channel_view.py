@@ -474,6 +474,90 @@ class TestChannelView(unittest.TestCase):
             finally:
                 widget.close()
 
+    def test_channel_canvas_shares_backup_baseline(self):
+        """Right-view edits must persist: the channel canvas shares the main
+        canvas's ``shapes_backups`` baseline so its move/rotate guards can emit
+        ``shape_moved`` and reach ``set_dirty()``."""
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = os.path.join(directory, "source.png")
+            cv2.imwrite(image_path, _make_band_image())
+
+            widget = self._build_widget(image_path)
+            try:
+                self._enable_side_by_side(widget)
+                self._append_shape(widget)
+                # Establish the undo baseline the way Canvas.load_shapes does
+                # when an image with labels is loaded through the widget.
+                widget.canvas.store_shapes()
+                widget._repoint_shapes()
+
+                # The channel canvas must own a backup baseline identical to
+                # the main canvas's, otherwise its guards never emit.
+                self.assertIs(
+                    widget.channel_canvas.shapes_backups,
+                    widget.canvas.shapes_backups,
+                )
+                self.assertTrue(widget.channel_canvas.shapes_backups)
+
+                # Simulate a real drag finish on the RIGHT canvas: the move
+                # guard compares the stored backup against current points. With
+                # a shared baseline, shape_moved must fire and set_dirty must
+                # run.
+                emitted = []
+                widget.channel_canvas.shape_moved.connect(
+                    lambda *_: emitted.append(1)
+                )
+                moved = widget.channel_canvas.shapes[0]
+                # Snapshot the pre-move points so the guard sees a difference.
+                pre_move = QPointF(moved[0])
+                widget.channel_canvas.selected_shapes = [moved]
+                widget.channel_canvas.moving_shape = True
+                widget.channel_canvas.bounded_move_shapes(
+                    widget.channel_canvas.selected_shapes, QPointF(5, 5)
+                )
+                widget.channel_canvas.store_moving_shape()
+
+                self.assertEqual(emitted, [1])
+                self.assertEqual(moved[0], QPointF(pre_move.x() + 5, pre_move.y() + 5))
+                # The move propagated to the shared authoritative shape model.
+                self.assertIs(widget.channel_canvas.shapes[0], widget.canvas.shapes[0])
+            finally:
+                widget.close()
+
+    def test_channel_move_triggers_set_dirty(self):
+        """Moving a shape on the right view must mark the widget dirty context
+        (via ``_channel_shape_changed`` -> ``set_dirty``), which is what makes
+        right-view edits permanent."""
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = os.path.join(directory, "source.png")
+            cv2.imwrite(image_path, _make_band_image())
+
+            widget = self._build_widget(image_path)
+            try:
+                self._enable_side_by_side(widget)
+                self._append_shape(widget)
+                widget.canvas.store_shapes()
+                widget._repoint_shapes()
+
+                widget.dirty = False
+                # Force the non-auto-save path so set_dirty() flips the flag
+                # instead of writing the label file immediately.
+                widget._config["auto_save"] = False
+                moved = widget.channel_canvas.shapes[0]
+                widget.channel_canvas.selected_shapes = [moved]
+                widget.channel_canvas.moving_shape = True
+                widget.channel_canvas.prev_point = QPointF(0, 0)
+                widget.channel_canvas.bounded_move_shapes(
+                    widget.channel_canvas.selected_shapes, QPointF(5, 5)
+                )
+                # The widget handler wired to the channel canvas move signal.
+                widget._channel_shape_changed()
+
+                self.assertTrue(widget.dirty)
+            finally:
+                widget.dirty = False
+                widget.close()
+
 
 if __name__ == "__main__":
     unittest.main()
