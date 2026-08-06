@@ -336,6 +336,13 @@ class SettingsRuntimeApplier:
             str(crosshair["color"]),
             float(crosshair["opacity"]),
         )
+        if hasattr(self._widget, "channel_canvas") and self._widget.channel_canvas is not None:
+            self._widget.channel_canvas.set_cross_line(
+                bool(crosshair["show"]),
+                float(crosshair["width"]),
+                str(crosshair["color"]),
+                float(crosshair["opacity"]),
+            )
         self._widget.crosshair_settings = dict(crosshair)
 
     def apply_canvas_brush(self) -> None:
@@ -346,6 +353,14 @@ class SettingsRuntimeApplier:
         self._widget.canvas.brush_simplify_epsilon_px = float(
             brush["simplify_epsilon"]
         )
+        if hasattr(self._widget, "channel_canvas") and self._widget.channel_canvas is not None:
+            self._widget.channel_canvas.brush_point_distance = float(
+                brush["point_distance"]
+            )
+            self._widget.channel_canvas.brush_simplify_epsilon_px = float(
+                brush["simplify_epsilon"]
+            )
+            self._widget.channel_canvas.update()
 
     def apply_canvas_attributes(self) -> None:
         attrs = self._widget._config["canvas"]["attributes"]
@@ -355,6 +370,13 @@ class SettingsRuntimeApplier:
         self._widget.canvas.attr_border_color = list(attrs["border_color"])
         self._widget.canvas.attr_text_color = list(attrs["text_color"])
         self._widget.canvas.update()
+        if hasattr(self._widget, "channel_canvas") and self._widget.channel_canvas is not None:
+            self._widget.channel_canvas.attr_background_color = list(
+                attrs["background_color"]
+            )
+            self._widget.channel_canvas.attr_border_color = list(attrs["border_color"])
+            self._widget.channel_canvas.attr_text_color = list(attrs["text_color"])
+            self._widget.channel_canvas.update()
 
     def apply_canvas_rotation(self) -> None:
         rotation = self._widget._config["canvas"]["rotation"]
@@ -364,6 +386,14 @@ class SettingsRuntimeApplier:
         self._widget.canvas.small_rotation_increment = math.radians(
             float(rotation["small_increment"])
         )
+        if hasattr(self._widget, "channel_canvas") and self._widget.channel_canvas is not None:
+            self._widget.channel_canvas.large_rotation_increment = math.radians(
+                float(rotation["large_increment"])
+            )
+            self._widget.channel_canvas.small_rotation_increment = math.radians(
+                float(rotation["small_increment"])
+            )
+            self._widget.channel_canvas.update()
 
     def apply_canvas_cuboid(self) -> None:
         cuboid = self._widget._config["canvas"]["cuboid"]
@@ -373,12 +403,21 @@ class SettingsRuntimeApplier:
             float(default_depth_vector[1]),
         ]
         self._widget.canvas.cuboid_min_depth = float(cuboid["min_depth"])
+        if hasattr(self._widget, "channel_canvas") and self._widget.channel_canvas is not None:
+            self._widget.channel_canvas.cuboid_default_depth_vector = [
+                float(default_depth_vector[0]),
+                float(default_depth_vector[1]),
+            ]
+            self._widget.channel_canvas.cuboid_min_depth = float(cuboid["min_depth"])
+            self._widget.channel_canvas.update()
 
     def apply_canvas_mask(self) -> None:
-        self._widget.canvas.mask_opacity = int(
-            self._widget._config["canvas"]["mask"]["opacity"]
-        )
+        opacity = int(self._widget._config["canvas"]["mask"]["opacity"])
+        self._widget.canvas.mask_opacity = opacity
         self._widget.canvas.update()
+        if hasattr(self._widget, "channel_canvas") and self._widget.channel_canvas is not None:
+            self._widget.channel_canvas.mask_opacity = opacity
+            self._widget.channel_canvas.update()
 
     def apply_shape_style(self, key: str) -> None:
         shape_config = self._widget._config["shape"]

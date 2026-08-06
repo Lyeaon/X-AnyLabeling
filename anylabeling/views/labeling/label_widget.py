@@ -5347,8 +5347,12 @@ class LabelingWidget(LabelDialog):
                 selected_shapes.append(item.shape())
             if selected_shapes:
                 self.canvas.select_shapes(selected_shapes)
+                if hasattr(self, "channel_canvas") and self.channel_canvas is not None:
+                    self.channel_canvas.select_shapes(selected_shapes)
             else:
                 self.canvas.deselect_shape()
+                if hasattr(self, "channel_canvas") and self.channel_canvas is not None:
+                    self.channel_canvas.deselect_shape()
 
     def label_item_changed(self, item):
         shape = item.shape()
@@ -5356,6 +5360,10 @@ class LabelingWidget(LabelDialog):
         self.canvas.set_shape_visible(
             shape, item.checkState() == Qt.CheckState.Checked
         )
+        if hasattr(self, "channel_canvas") and self.channel_canvas is not None:
+            self.channel_canvas.set_shape_visible(
+                shape, item.checkState() == Qt.CheckState.Checked
+            )
         self._update_select_toggle_button_tooltip()
         if (
             hasattr(self, "navigator_dialog")
@@ -5833,6 +5841,11 @@ class LabelingWidget(LabelDialog):
         assert hasattr(self.canvas, key), f"Canvas has no attribute {key}"
         setattr(self.canvas, key, value)
         self.canvas.update()
+        # Sync to channel canvas if it exists and has the attribute
+        if hasattr(self, "channel_canvas") and self.channel_canvas is not None:
+            if hasattr(self.channel_canvas, key):
+                setattr(self.channel_canvas, key, value)
+                self.channel_canvas.update()
 
     def open_settings_dialog(self):
         if self._settings_controller is None:
@@ -5881,6 +5894,8 @@ class LabelingWidget(LabelDialog):
         self.channel_canvas.load_pixmap(
             QtGui.QPixmap.fromImage(qimage), clear_shapes=False
         )
+        # Ensure visual settings are synced to channel canvas
+        self._sync_visual_settings_to_channel()
 
     def _current_bc(self):
         """Return the stored brightness/contrast slider values (0-150)."""
@@ -5962,6 +5977,7 @@ class LabelingWidget(LabelDialog):
             self.channel_live_timer.stop()
 
         self._repoint_shapes()
+        self._sync_visual_settings_to_channel()
         self._sync_navigation_to_channel()
 
         # Refresh the navigator preview.
@@ -6047,6 +6063,36 @@ class LabelingWidget(LabelDialog):
         self.channel_canvas.selected_shapes = getattr(
             self.canvas, "selected_shapes", []
         )
+
+    def _sync_visual_settings_to_channel(self) -> None:
+        """Sync all visual settings from main canvas to channel canvas.
+
+        This ensures the right (channel) view matches the left (main) view
+        in terms of visual settings like labels, masks, opacity, etc.
+        """
+        if not hasattr(self, "channel_canvas") or self.channel_canvas is None:
+            return
+        # List of visual settings that should be kept in sync
+        visual_attrs = [
+            "show_labels",
+            "show_masks",
+            "show_texts",
+            "show_scores",
+            "show_degrees",
+            "show_attributes",
+            "show_linking",
+            "show_groups",
+            "show_masks",
+            "show_texts",
+            "show_labels",
+            "shape_opacity",
+            "mask_opacity",
+            "cross_line_opacity",
+        ]
+        for attr in visual_attrs:
+            if hasattr(self.canvas, attr):
+                setattr(self.channel_canvas, attr, getattr(self.canvas, attr))
+        self.channel_canvas.update()
 
     def _mirror_transient(self, src, dst):
         """Copy editing / transient state from ``src`` canvas to ``dst``."""
@@ -6199,18 +6245,22 @@ class LabelingWidget(LabelDialog):
     def _channel_new_shape(self):
         self._mirror_transient(self.channel_canvas, self.canvas)
         self.new_shape(self.channel_canvas)
+        self._sync_visual_settings_to_channel()
 
     def _channel_shape_changed(self):
         self._mirror_transient(self.channel_canvas, self.canvas)
         self.set_dirty()
+        self._sync_visual_settings_to_channel()
 
     def _channel_shapes_deleted(self, shapes):
         self._mirror_transient(self.channel_canvas, self.canvas)
         self.on_canvas_shapes_deleted(shapes)
+        self._sync_visual_settings_to_channel()
 
     def _channel_selection_changed(self, selected):
         self._mirror_transient(self.channel_canvas, self.canvas)
         self.shape_selection_changed(selected)
+        self._sync_visual_settings_to_channel()
 
     def _channel_brush_history(self, can_undo):
         if hasattr(self.actions, "undo"):
@@ -6334,8 +6384,12 @@ class LabelingWidget(LabelDialog):
 
     def _on_shape_opacity_changed(self, value):
         """Update label/shape opacity from the slider value (0-100)."""
-        self.canvas.shape_opacity = value / 100.0
+        opacity = value / 100.0
+        self.canvas.shape_opacity = opacity
         self.canvas.update()
+        if hasattr(self, "channel_canvas") and self.channel_canvas is not None:
+            self.channel_canvas.shape_opacity = opacity
+            self.channel_canvas.update()
 
     def _on_inline_brightness_contrast(self, brightness, contrast):
         """Apply brightness/contrast from the inline adjustment sliders.
@@ -6418,6 +6472,8 @@ class LabelingWidget(LabelDialog):
 
         self.selected_polygon_stack.extend(shapes_to_hide)
         self.canvas.update()
+        if hasattr(self, "channel_canvas") and self.channel_canvas is not None:
+            self.channel_canvas.update()
         if (
             hasattr(self, "navigator_dialog")
             and self.navigator_dialog.isVisible()
@@ -6432,6 +6488,8 @@ class LabelingWidget(LabelDialog):
                 item.setCheckState(Qt.CheckState.Checked)
                 shape_to_show.visible = True
                 self.canvas.update()
+                if hasattr(self, "channel_canvas") and self.channel_canvas is not None:
+                    self.channel_canvas.update()
                 if (
                     hasattr(self, "navigator_dialog")
                     and self.navigator_dialog.isVisible()
@@ -7153,10 +7211,22 @@ class LabelingWidget(LabelDialog):
             self._set_file_item_checked(item, False)
 
             filename = self.filename
+            # Save channel view settings before reset_state()
+            prev_main_channel = self._main_channel
+            prev_compare_channel = self._compare_channel
+            prev_side_by_side = self._side_by_side
+
             self.reset_state()
             self.filename = filename
             if self.filename:
                 self.load_file(self.filename)
+
+            # Restore channel view settings after load_file()
+            self._main_channel = prev_main_channel
+            self._compare_channel = prev_compare_channel
+            self._side_by_side = prev_side_by_side
+            if self._side_by_side:
+                self._apply_channel_view()
 
     def delete_image_file(self):
         if len(self.image_list) < 2:
@@ -7217,6 +7287,11 @@ class LabelingWidget(LabelDialog):
                 else:
                     filename = self.image_list[0]
 
+            # Save channel view settings before reset_state()
+            prev_main_channel = self._main_channel
+            prev_compare_channel = self._compare_channel
+            prev_side_by_side = self._side_by_side
+
             self.reset_state()
             if osp.isfile(image_path):
                 image_path = osp.dirname(image_path)
@@ -7225,6 +7300,13 @@ class LabelingWidget(LabelDialog):
             self.filename = filename
             if self.filename:
                 self.load_file(self.filename)
+
+            # Restore channel view settings after load_file()
+            self._main_channel = prev_main_channel
+            self._compare_channel = prev_compare_channel
+            self._side_by_side = prev_side_by_side
+            if self._side_by_side:
+                self._apply_channel_view()
 
     # Message Dialogs. #
     def has_labels(self):
@@ -7288,6 +7370,8 @@ class LabelingWidget(LabelDialog):
             and self.navigator_dialog.isVisible()
         ):
             self.update_navigator_shapes()
+        if hasattr(self, "channel_canvas") and self.channel_canvas is not None:
+            self.channel_canvas.update()
 
     def remove_selected_point(self):
         self.canvas.remove_selected_point()
