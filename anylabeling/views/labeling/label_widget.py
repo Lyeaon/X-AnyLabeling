@@ -458,6 +458,9 @@ class LabelingWidget(LabelDialog):
         self.canvas.cross_section_changed.connect(
             self._on_canvas_cross_section_changed
         )
+        self.channel_canvas.cross_section_changed.connect(
+            self._on_channel_cross_section_changed
+        )
 
         scroll_area = QScrollArea()
         scroll_area.setWidget(self.canvas)
@@ -6109,15 +6112,19 @@ class LabelingWidget(LabelDialog):
         # the 3D window is open.
         if self.canvas is not None:
             self.canvas.set_cross_section_active(True)
+        if self.channel_canvas is not None:
+            self.channel_canvas.set_cross_section_active(True)
         dialog.show()
 
     def _on_crosshair_view_closed(self):
         """Releases the canvas crosshair back to pointer-following."""
         if self.canvas is not None:
             self.canvas.set_cross_section_active(False)
+        if self.channel_canvas is not None:
+            self.channel_canvas.set_cross_section_active(False)
 
     def _on_canvas_cross_section_changed(self, u: int, v: int):
-        """Forward the canvas crosshair (cross-section) to the open 3D window."""
+        """Forward the canvas crosshair (cross-section) to the open 3D window and sync channel canvas."""
         wnd = getattr(self, "_view3d_window", None)
         if wnd is None:
             return
@@ -6127,6 +6134,23 @@ class LabelingWidget(LabelDialog):
                 wnd.toolbar.set_cross_section(u, v)
         except Exception:
             pass
+        # Sync to channel canvas
+        if self.channel_canvas is not None:
+            self.channel_canvas.set_cross_section(u, v, emit=False)
+
+    def _on_channel_cross_section_changed(self, u: int, v: int):
+        """Forward the channel canvas crosshair to the open 3D window and sync main canvas."""
+        wnd = getattr(self, "_view3d_window", None)
+        if wnd is not None:
+            try:
+                wnd.set_cross_section(u, v, True)
+                if hasattr(wnd.toolbar, "set_cross_section"):
+                    wnd.toolbar.set_cross_section(u, v)
+            except Exception:
+                pass
+        # Sync back to main canvas
+        if self.canvas is not None:
+            self.canvas.set_cross_section(u, v, emit=False)
 
     def _on_cross_section_from_3d(self, u, v):
         """Sync the canvas crosshair from the 3D window spin-boxes."""
@@ -6137,6 +6161,8 @@ class LabelingWidget(LabelDialog):
             return
         if self.canvas is not None:
             self.canvas.set_cross_section(u, v, emit=False)
+        if self.channel_canvas is not None:
+            self.channel_canvas.set_cross_section(u, v, emit=False)
 
     def _auto_detect_depth_scale(self, depth_channel: Optional[np.ndarray]) -> float:
         """Auto-detect depth scale from image statistics.
@@ -6204,8 +6230,10 @@ class LabelingWidget(LabelDialog):
         """
         if not hasattr(self, "channel_canvas") or self.channel_canvas is None:
             return
-        # List of visual settings that should be kept in sync
+        # List of visual/behavior settings that should be kept in sync
+        # for full parity between the two views.
         visual_attrs = [
+            # Visual toggles
             "show_labels",
             "show_masks",
             "show_texts",
@@ -6214,12 +6242,20 @@ class LabelingWidget(LabelDialog):
             "show_attributes",
             "show_linking",
             "show_groups",
-            "show_masks",
-            "show_texts",
-            "show_labels",
+            # Behavior flags (critical for identical interaction)
+            "h_shape_is_hovered",
+            "auto_highlight_shape",
+            "enable_wheel_rectangle_editing",
+            "snapping",
+            "epsilon",
+            # Crosshair settings
+            "cross_line_show",
+            "cross_line_width",
+            "cross_line_color",
+            "cross_line_opacity",
+            # Opacity
             "shape_opacity",
             "mask_opacity",
-            "cross_line_opacity",
         ]
         for attr in visual_attrs:
             if hasattr(self.canvas, attr):
@@ -6244,6 +6280,10 @@ class LabelingWidget(LabelDialog):
             "is_brush_mode",
             "_selected_group_id",
             "_hovered_group_id",
+            "prev_move_point",
+            "_cross_section",
+            "_cross_section_active",
+            "_cs_dragging",
         ):
             value = getattr(src, attr, None)
             # ``offsets`` must stay a 2-tuple: canvas move code reads
@@ -6283,6 +6323,7 @@ class LabelingWidget(LabelDialog):
             or getattr(canvas, "moving_shape", False)
             or getattr(canvas, "is_move_editing", False)
             or getattr(canvas, "_brush_drawing", False)
+            or getattr(canvas, "h_shape", None) is not None
         )
 
     def _canvas_has_transient(self, canvas):
@@ -6360,7 +6401,11 @@ class LabelingWidget(LabelDialog):
         if not (self._side_by_side and self._has_channels):
             self.channel_live_timer.stop()
             return
-        src = self._active_editing_canvas()
+        # Always sync from the canvas that last received mouse input
+        src = getattr(self, "_last_input_canvas", None)
+        if src not in (self.canvas, self.channel_canvas):
+            # Fallback: use active editing canvas if no recent input
+            src = self._active_editing_canvas()
         if src is None:
             self._clear_stale_mirrors()
             return

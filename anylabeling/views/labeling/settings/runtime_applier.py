@@ -493,6 +493,10 @@ class SettingsRuntimeApplier:
             value = self._widget._config.get("auto_highlight_shape", False)
             self._widget.canvas.auto_highlight_shape = value
             self._widget.canvas.h_shape_is_hovered = value
+            # Sync to channel canvas for behavioral parity
+            if hasattr(self._widget, "channel_canvas") and self._widget.channel_canvas is not None:
+                self._widget.channel_canvas.auto_highlight_shape = value
+                self._widget.channel_canvas.h_shape_is_hovered = value
         elif key == "auto_switch_to_edit_mode":
             self.set_auto_switch_to_edit_mode(
                 self._widget._config.get("auto_switch_to_edit_mode", False)
