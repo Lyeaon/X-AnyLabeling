@@ -15,8 +15,17 @@ from .pointcloud import (
     pointcloud_to_arrays,
     create_pointcloud_from_depth_image,
     estimate_camera_params,
+    planarity_r2,
+    extract_cross_sections,
     OPEN3D_AVAILABLE,
 )
+
+try:
+    import pyqtgraph as pg
+    PYQTGRAPH_AVAILABLE = True
+except ImportError:
+    PYQTGRAPH_AVAILABLE = False
+    pg = None
 
 
 class View3DWindow(QtWidgets.QMainWindow):
@@ -59,6 +68,17 @@ class View3DWindow(QtWidgets.QMainWindow):
         self._use_channel = use_channel
         self._focal_length = focal_length
         self._depth_scale = depth_scale
+        self._fov_degrees = 60.0
+        self._depth_is_range = True
+        self._projection = "orthographic"
+        self._field_width_m = 3.0
+        self._field_height_m = 3.0
+        self._show_orientation = True
+        self._cross_u = 0
+        self._cross_v = 0
+        self._cross_active = False
+        self._cross_zmin = 0.0
+        self._cross_zmax = 0.0
 
         self._current_points = None
         self._current_colors = None
@@ -66,6 +86,11 @@ class View3DWindow(QtWidgets.QMainWindow):
 
         self._init_ui()
         self._generate_3d_model()
+        if self._depth_channel is not None:
+            h, w = self._depth_channel.shape[:2]
+            self._cross_u, self._cross_v = w // 2, h // 2
+            self._cross_active = True
+            self._refresh_cross_section()
 
     def _init_ui(self):
         """Initialize the UI."""
@@ -93,15 +118,29 @@ class View3DWindow(QtWidgets.QMainWindow):
         self.toolbar.background_color_changed.connect(self._on_bg_color_changed)
         self.toolbar.grid_toggled.connect(self._on_grid_toggled)
         self.toolbar.axis_toggled.connect(self._on_axis_toggled)
+        self.toolbar.orientation_toggled.connect(self._on_orientation_toggled)
         self.toolbar.projection_changed.connect(self._on_projection_changed)
         self.toolbar.color_mode_changed.connect(self._on_color_mode_changed)
         self.toolbar.point_size_value_changed.connect(self._on_point_size_value_changed)
         self.toolbar.depth_scale_changed.connect(self._on_depth_scale_changed)
+        self.toolbar.fov_changed.connect(self._on_fov_changed)
+        self.toolbar.depth_is_range_changed.connect(self._on_depth_is_range_changed)
+        self.toolbar.reconstruction_mode_changed.connect(self._on_reconstruction_mode_changed)
+        self.toolbar.field_size_changed.connect(self._on_field_size_changed)
+        self.toolbar.render_requested.connect(self._on_render_requested)
+        self.toolbar.cross_section_changed.connect(self._on_toolbar_cross_section_changed)
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, self.toolbar)
 
-        # 3D Viewer
+        # 3D Viewer (left) + cross-section profile panels (right)
         self.gl_widget = GLViewerWidget(self)
-        self.setCentralWidget(self.gl_widget)
+        self._build_profile_panels()
+        self._splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self._splitter.addWidget(self.gl_widget)
+        self._splitter.addWidget(self._profile_container)
+        self._splitter.setStretchFactor(0, 3)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setSizes([720, 300])
+        self.setCentralWidget(self._splitter)
 
         # Status bar
         self.status_bar = QtWidgets.QStatusBar()
@@ -113,6 +152,120 @@ class View3DWindow(QtWidgets.QMainWindow):
 
         # Shortcuts
         self._setup_shortcuts()
+
+    def _build_profile_panels(self):
+        """Build the right-hand 1-D cross-section profile panels."""
+        self._profile_container = QtWidgets.QWidget(self)
+        layout = QtWidgets.QVBoxLayout(self._profile_container)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        title = QtWidgets.QLabel("Cross-Section Profiles")
+        title.setStyleSheet("font-weight: bold;")
+        layout.addWidget(title)
+
+        if not PYQTGRAPH_AVAILABLE:
+            placeholder = QtWidgets.QLabel("pyqtgraph required for profiles")
+            placeholder.setWordWrap(True)
+            layout.addWidget(placeholder)
+            layout.addStretch(1)
+            self._plot_right = None
+            self._plot_bottom = None
+            return
+
+        self._plot_right = pg.PlotWidget()
+        self._plot_right.setTitle("Left → Right (row v)")
+        self._plot_right.setLabel("bottom", "X", units="m")
+        self._plot_right.setLabel("left", "Height", units="m")
+        self._plot_right.showGrid(x=True, y=True, alpha=0.3)
+        self._curve_right = self._plot_right.plot(pen=pg.mkPen((0, 255, 239, 255), width=2))
+        layout.addWidget(self._plot_right)
+
+        self._plot_bottom = pg.PlotWidget()
+        self._plot_bottom.setTitle("Top → Bottom (col u)")
+        self._plot_bottom.setLabel("bottom", "Y", units="m")
+        self._plot_bottom.setLabel("left", "Height", units="m")
+        self._plot_bottom.showGrid(x=True, y=True, alpha=0.3)
+        self._curve_bottom = self._plot_bottom.plot(pen=pg.mkPen((255, 200, 0, 255), width=2))
+        layout.addWidget(self._plot_bottom)
+
+    def set_cross_section(self, u: int, v: int, active: bool = True):
+        """Update the cross-section location and refresh all linked views.
+
+        Recomputes the two 1-D profile curves and moves the dashed slice lines
+        on the 3D slab. Called both from the canvas crosshair drag (via
+        label_widget) and from the toolbar spin-boxes.
+        """
+        if not active:
+            self._cross_active = False
+            self.gl_widget.clear_cross_slice()
+            return
+        self._cross_active = True
+        h, w = self._depth_channel.shape[:2]
+        u = min(max(int(u), 0), w - 1)
+        v = min(max(int(v), 0), h - 1)
+        self._cross_u, self._cross_v = u, v
+        self._refresh_cross_section()
+
+    def _compute_cross_section_state(self) -> dict:
+        """Compute cross-section profiles for the current (u, v)."""
+        return extract_cross_sections(
+            self._depth_channel,
+            self._cross_u,
+            self._cross_v,
+            depth_scale=self._depth_scale,
+            field_width_m=self._field_width_m,
+            field_height_m=self._field_height_m,
+        )
+
+    def _refresh_cross_section(self):
+        """Recompute profiles and redraw curves + 3D slice lines."""
+        if self._depth_channel is None or not self._cross_active:
+            return
+        cs = self._compute_cross_section_state()
+        self._cross_zmin, self._cross_zmax = cs["zmin"], cs["zmax"]
+        self._update_profile_curves(cs)
+        self._update_slice_lines(cs)
+
+    def _update_profile_curves(self, cs: dict):
+        if not PYQTGRAPH_AVAILABLE:
+            return
+        # Use the GLOBAL depth range for both y-axes so relief is visible even
+        # though the slab X/Y footprint spans ~3 m.
+        ymin, ymax = cs["zmin"], cs["zmax"]
+        pad = (ymax - ymin) * 0.1 + 1e-9
+        if self._plot_right is not None:
+            self._curve_right.setData(cs["left_right_x"], cs["left_right_z"])
+            self._plot_right.setYRange(ymin - pad, ymax + pad)
+            self._plot_right.setTitle(f"Left → Right (row {int(self._cross_v)})")
+        if self._plot_bottom is not None:
+            self._curve_bottom.setData(cs["top_bottom_y"], cs["top_bottom_z"])
+            self._plot_bottom.setYRange(ymin - pad, ymax + pad)
+            self._plot_bottom.setTitle(f"Top → Bottom (col {int(self._cross_u)})")
+
+    def _update_slice_lines(self, cs: dict):
+        z = float(cs["left_right_z"].max())
+        x0 = float(cs["left_right_x"][self._cross_u])  # X at crosshair column
+        y0 = float(cs["top_bottom_y"][self._cross_v])  # Y at crosshair row
+        self.gl_widget.set_cross_slice(
+            x0=x0,
+            y0=y0,
+            xmin=float(cs["left_right_x"][0]),
+            xmax=float(cs["left_right_x"][-1]),
+            ymin=float(cs["top_bottom_y"][0]),
+            ymax=float(cs["top_bottom_y"][-1]),
+            z=z,
+        )
+
+    def _on_toolbar_cross_section_changed(self, u: float, v: float):
+        """Handle crosshair position change from the toolbar spin-boxes."""
+        self.set_cross_section(u, v, True)
+        # Write back to the canvas so the 2D cross matches the 3D spin-box.
+        if (
+            self._parent_widget is not None
+            and hasattr(self._parent_widget, "_on_cross_section_from_3d")
+        ):
+            self._parent_widget._on_cross_section_from_3d(u, v)
 
     def _generate_3d_model(self):
         """Generate 3D model from selected channel."""
@@ -158,6 +311,11 @@ class View3DWindow(QtWidgets.QMainWindow):
                 depth=self._depth_channel,  # Use depth for geometry
                 color=self._get_color_data(color_mode),  # Use selected channel for color
                 depth_scale=self._depth_scale,  # Use depth scale for proper conversion
+                fov_degrees=self._fov_degrees,  # Used when intrinsic params are None
+                depth_is_range=self._depth_is_range,  # range vs perpendicular Z
+                projection=self._projection,  # pinhole vs orthographic (top-view)
+                field_width_m=self._field_width_m,  # physical footprint (orthographic)
+                field_height_m=self._field_height_m,  # physical footprint (orthographic)
             )
 
             if self._current_pcd is not None:
@@ -173,7 +331,27 @@ class View3DWindow(QtWidgets.QMainWindow):
 
             if points is not None:
                 self.gl_widget.set_point_cloud(points, colors)
-                self.status_bar.showMessage(f"Points: {len(points)}")
+                r2 = planarity_r2(points)
+                self.status_bar.showMessage(
+                    f"Points: {len(points)} · plane-fit R²={r2:.4f}"
+                    if r2 == r2  # not NaN
+                    else f"Points: {len(points)}"
+                )
+                if self._show_orientation and len(points) > 0:
+                    z_base = float(points[:, 2].min())
+                    z_max = float(points[:, 2].max())
+                    # Raise labels slightly above the base so they float over the
+                    # slab and are easier to read.
+                    z_base = z_base + 0.05 * (z_max - z_base + 1e-6)
+                    self.gl_widget.set_orientation_labels(
+                        xmin=float(points[:, 0].min()),
+                        xmax=float(points[:, 0].max()),
+                        ymin=float(points[:, 1].min()),
+                        ymax=float(points[:, 1].max()),
+                        z_base=z_base,
+                    )
+                elif self._show_orientation:
+                    self.gl_widget.clear_orientation()
             else:
                 self.status_bar.showMessage("No points generated")
 
@@ -298,18 +476,44 @@ class View3DWindow(QtWidgets.QMainWindow):
     def _on_axis_toggled(self, visible: bool):
         self.gl_widget.toggle_axis(visible)
 
+    def _on_orientation_toggled(self, visible: bool):
+        self._show_orientation = bool(visible)
+        self.gl_widget.toggle_orientation(bool(visible))
+
     def _on_projection_changed(self, perspective: bool):
         # GLViewWidget doesn't directly support ortho/perspective toggle
         # Would need custom implementation
         pass
 
+    def _on_fov_changed(self, fov: float):
+        """Handle FOV change from toolbar - store for the next render."""
+        self._fov_degrees = float(fov)
+
+    def _on_depth_is_range_changed(self, is_range: bool):
+        """Handle depth-convention toggle - store for the next render."""
+        self._depth_is_range = bool(is_range)
+
+    def _on_reconstruction_mode_changed(self, mode: str):
+        """Handle projection mode change (pinhole vs orthographic)."""
+        self._projection = str(mode)
+
+    def _on_field_size_changed(self, width_m: float, height_m: float):
+        """Handle physical footprint change for the orthographic projection."""
+        self._field_width_m = float(width_m)
+        self._field_height_m = float(height_m)
+
     def _on_depth_scale_changed(self, scale: float):
-        """Handle depth scale change from toolbar."""
+        """Handle depth scale change from toolbar - store for the next render."""
         if scale == 0.0:  # Auto-detect
             self._depth_scale = self._auto_detect_depth_scale(self._depth_channel)
         else:
             self._depth_scale = scale
+
+    def _on_render_requested(self):
+        """Rebuild the point cloud with the current parameter settings."""
         self._generate_3d_model()
+        if self._cross_active:
+            self._refresh_cross_section()
 
     def _auto_detect_depth_scale(self, depth_channel: Optional[np.ndarray]) -> float:
         """Auto-detect depth scale from image statistics."""
@@ -326,8 +530,8 @@ class View3DWindow(QtWidgets.QMainWindow):
         return 1.0
 
     def _on_color_mode_changed(self, mode: str):
-        """Handle color mode change - regenerate point cloud with new coloring."""
-        self._generate_3d_model()
+        """Handle color mode change - store for the next render."""
+        self._color_mode = mode
 
     def _on_point_size_value_changed(self, size: int):
         self.gl_widget.set_point_size(size)
@@ -338,5 +542,13 @@ class View3DWindow(QtWidgets.QMainWindow):
         pass
 
     def closeEvent(self, event):
-        """Handle window close."""
+        """Handle window close; release the canvas crosshair if needed."""
+        try:
+            if (
+                self._parent_widget is not None
+                and hasattr(self._parent_widget, "_on_crosshair_view_closed")
+            ):
+                self._parent_widget._on_crosshair_view_closed()
+        except Exception:
+            pass
         super().closeEvent(event)

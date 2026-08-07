@@ -455,6 +455,9 @@ class LabelingWidget(LabelDialog):
         self.canvas.split_position_changed.connect(
             self.compare_view_slider.set_position
         )
+        self.canvas.cross_section_changed.connect(
+            self._on_canvas_cross_section_changed
+        )
 
         scroll_area = QScrollArea()
         scroll_area.setWidget(self.canvas)
@@ -6095,7 +6098,45 @@ class LabelingWidget(LabelDialog):
             depth_scale=depth_scale,  # Pass depth scale for proper conversion
             parent_widget=self,
         )
+        # Track the open window so the canvas crosshair can drive its profiles.
+        if getattr(self, "_view3d_window", None) is not None:
+            try:
+                self._view3d_window.close()
+            except Exception:
+                pass
+        self._view3d_window = dialog
+        # Lock the canvas crosshair to the fixed cross-section selector while
+        # the 3D window is open.
+        if self.canvas is not None:
+            self.canvas.set_cross_section_active(True)
         dialog.show()
+
+    def _on_crosshair_view_closed(self):
+        """Releases the canvas crosshair back to pointer-following."""
+        if self.canvas is not None:
+            self.canvas.set_cross_section_active(False)
+
+    def _on_canvas_cross_section_changed(self, u: int, v: int):
+        """Forward the canvas crosshair (cross-section) to the open 3D window."""
+        wnd = getattr(self, "_view3d_window", None)
+        if wnd is None:
+            return
+        try:
+            wnd.set_cross_section(u, v, True)
+            if hasattr(wnd.toolbar, "set_cross_section"):
+                wnd.toolbar.set_cross_section(u, v)
+        except Exception:
+            pass
+
+    def _on_cross_section_from_3d(self, u, v):
+        """Sync the canvas crosshair from the 3D window spin-boxes."""
+        try:
+            u = int(round(u))
+            v = int(round(v))
+        except (TypeError, ValueError):
+            return
+        if self.canvas is not None:
+            self.canvas.set_cross_section(u, v, emit=False)
 
     def _auto_detect_depth_scale(self, depth_channel: Optional[np.ndarray]) -> float:
         """Auto-detect depth scale from image statistics.

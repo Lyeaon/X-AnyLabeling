@@ -78,6 +78,8 @@ class Canvas(
     # Emitted when brush-edit mode is toggled on/off (keeps the UI in sync).
     brush_mode_changed = QtCore.pyqtSignal(bool)
     brush_history_changed = QtCore.pyqtSignal(bool)
+    # Emitted while the crosshair is dragged (cross-section selection moved).
+    cross_section_changed = QtCore.pyqtSignal(int, int)
 
     CREATE, EDIT = 0, 1
 
@@ -212,6 +214,13 @@ class Canvas(
         self.cross_line_width = 2.0
         self.cross_line_color = "#00FF00"
         self.cross_line_opacity = 0.5
+        # Cross-section crosshair: fixed image-pixel position that only moves
+        # when the user clicks-and-drags its midpoint. Defaults to image center
+        # once a pixmap is loaded. Only "locked" (fixed + midpoint-draggable)
+        # while a 3D view is open; otherwise the cross follows the pointer.
+        self._cross_section = None
+        self._cs_dragging = False
+        self._cross_section_active = False
 
         # Set attributes color options.
         self.attr_background_color = self.attributes_config.get(
@@ -1737,6 +1746,13 @@ class Canvas(
         except AttributeError:
             return
 
+        # While actively dragging the crosshair midpoint, move the cross
+        # section with the cursor (plain mouse movement never moves it).
+        if self._cs_dragging:
+            self._set_cross_section_at(pos.x(), pos.y())
+            ev.accept()
+            return
+
         if self._space_panning:
             if self._left_button_pressed(ev):
                 self._update_space_pan(ev.position())
@@ -2353,6 +2369,26 @@ class Canvas(
         self._pending_edge_point = None
         pos = self.transform_pos(ev.position())
 
+        # Crosshair drag: press near the crosshair midpoint moves the
+        # cross-section selection (and does not start drawing/shapes). Only
+        # active while a 3D view is open.
+        if (
+            self._cross_section_active
+            and self.cross_line_show
+            and self._cross_section is not None
+            and ev.button() == QtCore.Qt.MouseButton.LeftButton
+        ):
+            cs_x, cs_y = self._cross_section
+            grab_r = max(8.0, 8.0 / self.scale)
+            if (
+                abs(pos.x() - cs_x) <= grab_r
+                and abs(pos.y() - cs_y) <= grab_r
+            ):
+                self._cs_dragging = True
+                self._set_cross_section_at(pos.x(), pos.y())
+                ev.accept()
+                return
+
         if self.is_brush_mode and self._brush_mouse_press(ev, pos):
             return
 
@@ -2607,6 +2643,11 @@ class Canvas(
     def mouseReleaseEvent(self, ev):
         """Mouse release event"""
         if self.is_loading:
+            return
+
+        if self._cs_dragging:
+            self._cs_dragging = False
+            ev.accept()
             return
 
         if ev.button() == QtCore.Qt.MouseButton.LeftButton and (
@@ -4248,23 +4289,51 @@ class Canvas(
                 p.drawText(text_pos, label_text)
             p.restore()
 
-        # Draw mouse coordinates
+        # Draw crosshair (cross-line). While a 3D view is open the cross-section is
+        # locked to a fixed position (moves only via its midpoint drag);
+        # otherwise it follows the pointer like the historical labeling cross.
         if self.cross_line_show:
-            pen = QtGui.QPen(
-                QtGui.QColor(self.cross_line_color),
-                max(1, int(round(self.cross_line_width / Shape.scale))),
-                Qt.PenStyle.DashLine,
-            )
-            p.setPen(pen)
-            p.setOpacity(self.cross_line_opacity)
-            p.drawLine(
-                QtCore.QPointF(self.prev_move_point.x(), 0),
-                QtCore.QPointF(self.prev_move_point.x(), self.pixmap.height()),
-            )
-            p.drawLine(
-                QtCore.QPointF(0, self.prev_move_point.y()),
-                QtCore.QPointF(self.pixmap.width(), self.prev_move_point.y()),
-            )
+            if self._cross_section_active and self._cross_section is not None:
+                cs_x, cs_y = self._cross_section
+                pen = QtGui.QPen(
+                    QtGui.QColor(self.cross_line_color),
+                    max(1, int(round(self.cross_line_width / Shape.scale))),
+                    Qt.PenStyle.DashLine,
+                )
+                p.setPen(pen)
+                p.setOpacity(self.cross_line_opacity)
+                p.drawLine(
+                    QtCore.QPointF(cs_x, 0),
+                    QtCore.QPointF(cs_x, self.pixmap.height()),
+                )
+                p.drawLine(
+                    QtCore.QPointF(0, cs_y),
+                    QtCore.QPointF(self.pixmap.width(), cs_y),
+                )
+                # Midpoint grab handle so the user can see where to drag to move it.
+                handle_r = max(3.0, 6.0 / Shape.scale)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(
+                    QtCore.QPointF(cs_x, cs_y),
+                    handle_r,
+                    handle_r,
+                )
+            else:
+                pen = QtGui.QPen(
+                    QtGui.QColor(self.cross_line_color),
+                    max(1, int(round(self.cross_line_width / Shape.scale))),
+                    Qt.PenStyle.DashLine,
+                )
+                p.setPen(pen)
+                p.setOpacity(self.cross_line_opacity)
+                p.drawLine(
+                    QtCore.QPointF(self.prev_move_point.x(), 0),
+                    QtCore.QPointF(self.prev_move_point.x(), self.pixmap.height()),
+                )
+                p.drawLine(
+                    QtCore.QPointF(0, self.prev_move_point.y()),
+                    QtCore.QPointF(self.pixmap.width(), self.prev_move_point.y()),
+                )
 
         # Draw attributes
         if self.show_attributes:
@@ -5136,6 +5205,11 @@ class Canvas(
         self.pixmap = pixmap
         if clear_shapes:
             self.shapes = []
+        if self._cross_section is None and pixmap is not None:
+            self._cross_section = (
+                pixmap.width() // 2,
+                pixmap.height() // 2,
+            )
         self.update()
 
     def load_shapes(self, shapes, replace=True):
@@ -5203,6 +5277,52 @@ class Canvas(
         self.cross_line_width = width
         self.cross_line_color = color
         self.cross_line_opacity = opacity
+        self.update()
+
+    def set_cross_section(self, u: int, v: int, emit: bool = True):
+        """Set the fixed crosshair (cross-section) position in image pixels."""
+        if self.pixmap is not None:
+            u = min(max(int(u), 0), self.pixmap.width() - 1)
+            v = min(max(int(v), 0), self.pixmap.height() - 1)
+        else:
+            u, v = int(u), int(v)
+        self._cross_section = (u, v)
+        if emit:
+            self.cross_section_changed.emit(u, v)
+        self.update()
+
+    def set_cross_section_active(self, active: bool):
+        """Lock/unlock the crosshair as the fixed cross-section selector.
+
+        While a 3D view is open (`active=True`) the cross is fixed at
+        ``_cross_section`` and moves only via its midpoint drag. Otherwise it
+        reverts to following the pointer (the historical labeling cross).
+        """
+        self._cross_section_active = bool(active)
+        if self._cross_section_active:
+            if self._cross_section is None and self.pixmap is not None:
+                self._cross_section = (
+                    self.pixmap.width() // 2,
+                    self.pixmap.height() // 2,
+                )
+        else:
+            self._cs_dragging = False
+        self.update()
+
+    def _set_cross_section_at(self, x: float, y: float):
+        """Update crosshair position from a cursor position and notify."""
+        if self._cross_section is None and self.pixmap is not None:
+            self._cross_section = (
+                self.pixmap.width() // 2,
+                self.pixmap.height() // 2,
+            )
+        u = int(round(x))
+        v = int(round(y))
+        if self.pixmap is not None:
+            u = min(max(u, 0), self.pixmap.width() - 1)
+            v = min(max(v, 0), self.pixmap.height() - 1)
+        self._cross_section = (u, v)
+        self.cross_section_changed.emit(u, v)
         self.update()
 
     def gen_new_group_id(self):

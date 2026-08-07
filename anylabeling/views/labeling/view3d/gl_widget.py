@@ -41,6 +41,8 @@ class GLViewerWidget(QtWidgets.QWidget):
         self._axis_item = None
         self._current_points = None
         self._current_colors = None
+        self._orientation_items = []
+        self._cross_items = []
 
         # Enable mouse tracking for hover effects
         self.view.setMouseTracking(True)
@@ -154,6 +156,159 @@ class GLViewerWidget(QtWidgets.QWidget):
             self._point_cloud_item = None
         self._current_points = None
         self._current_colors = None
+        self.clear_orientation()
+        self.clear_cross_slice()
+
+    @staticmethod
+    def _dashed_points(
+        p0: Tuple[float, float, float],
+        p1: Tuple[float, float, float],
+        dash: float = 0.05,
+        gap: float = 0.04,
+    ) -> np.ndarray:
+        """Generate a dashed line as a sequence of disconnected segments.
+
+        Returns an (N, 3) array where consecutive pairs describe individual
+        line segments (GL 'lines' mode) so the result reads as a dashed stroke.
+        """
+        p0 = np.asarray(p0, dtype=np.float64)
+        p1 = np.asarray(p1, dtype=np.float64)
+        length = float(np.linalg.norm(p1 - p0))
+        if length <= 0:
+            return np.empty((0, 3), dtype=np.float32)
+        step = max(dash + gap, 1e-6)
+        dirn = (p1 - p0) / length
+        segments = []
+        dist = 0.0
+        while dist < length:
+            s = min(dist + dash, length)
+            segments.append(p0 + dirn * dist)
+            segments.append(p0 + dirn * s)
+            dist += step
+        return np.asarray(segments, dtype=np.float32)
+
+    def set_cross_slice(
+        self,
+        x0: float,
+        y0: float,
+        xmin: float,
+        xmax: float,
+        ymin: float,
+        ymax: float,
+        z: float = 0.0,
+    ) -> None:
+        """Draw dashed slice lines on the slab at the crosshair position.
+
+        Two perpendicular dashed lines on the top surface: one along the X axis
+        at ``y0`` (the Left-Right profile location) and one along the Y axis at
+        ``x0`` (the Top-Bottom profile location).
+
+        Args:
+            x0, y0: Ground (X, Y) of the crosshair intersection
+            xmin, xmax: X extent of the footprint
+            ymin, ymax: Y extent of the footprint
+            z: Height at which the lines are drawn (slab top)
+        """
+        self.clear_cross_slice()
+        color = (0, 255, 239, 255)  # cyan, opaque
+        span_x = float(xmax) - float(xmin)
+        span_y = float(ymax) - float(ymin)
+
+        # Left-to-right: constant Y = y0, X varies across the footprint.
+        if span_x > 1e-9:
+            pts = self._dashed_points(
+                (float(xmin), float(y0), float(z)),
+                (float(xmax), float(y0), float(z)),
+                dash=0.08 * span_x,
+                gap=0.05 * span_x,
+            )
+            if len(pts):
+                item = gl.GLLinePlotItem(pos=pts, color=color, width=2.0, mode="lines")
+                self.view.addItem(item)
+                self._cross_items.append(item)
+
+        # Top-to-bottom: constant X at x0, Y varies across Y range.
+        if span_y > 1e-9:
+            pts = self._dashed_points(
+                (x0, float(ymin), float(z)),
+                (x0, float(ymax), float(z)),
+                dash=0.08 * span_y,
+                gap=0.05 * span_y,
+            )
+            if len(pts):
+                item = gl.GLLinePlotItem(pos=pts, color=color, width=2.0, mode="lines")
+                self.view.addItem(item)
+                self._cross_items.append(item)
+
+    def clear_cross_slice(self) -> None:
+        """Remove the cross-section slice lines from the view."""
+        for item in self._cross_items:
+            try:
+                self.view.removeItem(item)
+            except ValueError:
+                pass
+        self._cross_items = []
+
+    def clear_orientation(self) -> None:
+        """Remove all image-direction labels from the view."""
+        for item in self._orientation_items:
+            try:
+                self.view.removeItem(item)
+            except ValueError:
+                # Item was already removed or not in the view
+                pass
+        self._orientation_items = []
+
+    def set_orientation_labels(
+        self,
+        xmin: float,
+        xmax: float,
+        ymin: float,
+        ymax: float,
+        z_base: float = 0.0,
+    ) -> None:
+        """Add image-direction edge labels (Left/Right/Top/Bottom).
+
+        Anchors each label to the midpoint of the corresponding edge of the
+        model's X/Y footprint, raised slightly above the slab height so the
+        text stays readable above the points.
+
+        Args:
+            xmin, xmax: X extent of the reconstructed footprint
+            ymin, ymax: Y extent of the reconstructed footprint
+            z_base: Z (height) at which the labels are placed
+        """
+        self.clear_orientation()
+        z = float(z_base)
+
+        span_x = float(xmax) - float(xmin)
+        span_y = float(ymax) - float(ymin)
+        pad = 0.10 * max(span_x, span_y)
+
+        label_color = (255, 215, 0, 255)  # gold, opaque (0-255 ints)
+        label_font = QtGui.QFont("Helvetica", 36)
+
+        def edge(pos, text):
+            item = gl.GLTextItem(
+                pos=np.asarray(pos, dtype=np.float32),
+                text=text,
+                color=label_color,
+                font=label_font,
+            )
+            self.view.addItem(item)
+            self._orientation_items.append(item)
+            return item
+
+        # Place labels just outside the slab edges so points never occlude them.
+        edge((xmin - pad, 0, z), "Image Left")
+        edge((xmax + pad, 0, z), "Image Right")
+        edge((0, ymin - pad, z), "Image Top")
+        edge((0, ymax + pad, z), "Image Bottom")
+
+    def toggle_orientation(self, visible: bool) -> None:
+        """Show/hide orientation labels."""
+        for item in self._orientation_items:
+            item.setVisible(bool(visible))
 
     def fit_to_data(self, margin: float = 1.1) -> None:
         """Fit camera view to encompass all data."""
