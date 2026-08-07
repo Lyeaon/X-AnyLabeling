@@ -20,6 +20,51 @@
 
 <img src="https://github.com/user-attachments/assets/1480908f-b0d5-4e94-ac36-9cdc09f01fa8" alt="X-AnyLabeling interface" width="100%" />
 
+## Split_layer Branch Modification
+
+This branch introduces a **synchronized split-channel view** with integrated **3D depth visualization and cross-section analysis**, extending the side-by-side channel view with 3D depth inspection capabilities.
+
+### New Features
+
+#### 1. Side-by-Side Split Channel View
+- **Opens from**: `View → Channel → Show side-by-side`
+- Two fully interactive canvases side-by-side (main + channel view)
+- Independent channel selection per view (Depth, Reflectance, Other, Original RGB)
+- Shared shape model — annotations made in either view appear in both
+- Live navigation sync (zoom, pan, scroll) between both views
+
+#### 2. 3D Depth Viewer with Orthographic Projection
+- Opens from `View → Channel → 3D View`
+- **Orthographic (top-view) projection** — each pixel maps directly to a ground cell; depth = height above ground
+- Physical footprint configurable (`Field Width/Height` in meters, default 3×3 m)
+- Flat padding ring (value 128) reconstructs as a flat rectangular slab, not a pyramid
+- Point cloud colored by selected channel (Depth, Reflectance, Other)
+
+#### 3. Cross-Section Profiles
+- **1-D Depth Profile Panels** in the 3D Viewer (right side):
+  - **Left → Right**: depth profile along horizontal axis at crosshair's row
+  - **Top → Bottom**: depth profile along vertical axis at crosshair's column
+- Both panels use **global depth range** for clear relief visualization
+- **Synchronized crosshair** — drag the midpoint in either 2D view to set cross-section position; both views update live
+- 3D toolbar spinboxes move crosshair numerically; both views update
+- Dashed cyan slice lines on 3D slab show exact cross-section locations
+
+### Usage Workflow
+
+1. **Load multi-band image** (3+ channels: depth/reflectance/other)
+2. **Enable Side-by-Side**: `View → Channel → Show side-by-side`
+3. **Select channels** per view via channel dropdown
+4. **Open 3D Viewer**: `View → Channel → 3D View`
+5. **Adjust field size** (Width/Height in meters) for physical scale
+6. **Click 3D Render** to build point cloud
+7. **Set cross-section**: drag crosshair midpoint in either 2D view, or use 3D spinboxes
+8. **Read profiles**: Left→Right and Top→Bottom depth panels on right
+9. **Annotate**: both views show same shapes; shortcuts apply to both
+
+---
+
+*This branch merges the original split-channel view with the 3D depth visualization branch (`3dview`), adding cross-section analysis capabilities.*
+
 ## 🥳 What's New
 
 - `2026-08-05`: Release X-AnyLabeling v4.0.0.
