@@ -911,6 +911,43 @@ def export_dota_annotation(self):
         popup.show_popup(self, position="center")
 
 
+def _export_mask_files(
+    converter,
+    image_list,
+    output_dir,
+    save_path,
+    mapping_table,
+    include_null_images,
+    only_checked_images,
+    progress_dialog,
+):
+    for i, image_file in enumerate(image_list):
+        image_file_name = osp.basename(image_file)
+        label_file_name = osp.splitext(image_file_name)[0] + ".json"
+        dst_file_name = osp.splitext(image_file_name)[0] + ".png"
+
+        if output_dir:
+            src_file = osp.join(output_dir, label_file_name)
+        else:
+            src_file = osp.join(osp.dirname(image_file), label_file_name)
+        dst_file = osp.join(save_path, dst_file_name)
+
+        if osp.exists(src_file):
+            if (
+                not only_checked_images
+                or converter.read_json(src_file).get("checked", False) is True
+            ):
+                converter.custom_to_mask(src_file, dst_file, mapping_table)
+        elif include_null_images and not only_checked_images:
+            converter.custom_image_to_empty_mask(
+                image_file, dst_file, mapping_table
+            )
+
+        progress_dialog.setValue(i + 1)
+        if progress_dialog.wasCanceled():
+            break
+
+
 def export_mask_annotation(self):
     if not _check_filename_exist(self):
         return
@@ -971,6 +1008,21 @@ def export_mask_annotation(self):
     path_layout.addLayout(path_input_layout)
     layout.addLayout(path_layout)
 
+    options_label = QtWidgets.QLabel(self.tr("Export Options"))
+    layout.addWidget(options_label)
+
+    include_null_images_checkbox = QtWidgets.QCheckBox(
+        self.tr("Include images without labels?")
+    )
+    include_null_images_checkbox.setChecked(False)
+    layout.addWidget(include_null_images_checkbox)
+
+    only_checked_images_checkbox = QtWidgets.QCheckBox(
+        self.tr("Only export checked images?")
+    )
+    only_checked_images_checkbox.setChecked(False)
+    layout.addWidget(only_checked_images_checkbox)
+
     button_layout = QHBoxLayout()
     button_layout.setContentsMargins(0, 16, 0, 0)
     button_layout.setSpacing(8)
@@ -995,6 +1047,8 @@ def export_mask_annotation(self):
         return
 
     save_path = path_edit.text()
+    include_null_images = include_null_images_checkbox.isChecked()
+    only_checked_images = only_checked_images_checkbox.isChecked()
     if osp.exists(save_path):
         msg_box = QtWidgets.QMessageBox(self)
         msg_box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
@@ -1041,25 +1095,16 @@ def export_mask_annotation(self):
     )
 
     try:
-        for i, image_file in enumerate(image_list):
-            image_file_name = osp.basename(image_file)
-            label_file_name = osp.splitext(image_file_name)[0] + ".json"
-            dst_file_name = osp.splitext(image_file_name)[0] + ".png"
-
-            if self.output_dir:
-                src_file = osp.join(self.output_dir, label_file_name)
-            else:
-                src_file = osp.join(osp.dirname(image_file), label_file_name)
-            dst_file = osp.join(save_path, dst_file_name)
-
-            if not osp.exists(src_file):
-                continue
-
-            converter.custom_to_mask(src_file, dst_file, mapping_table)
-
-            progress_dialog.setValue(i)
-            if progress_dialog.wasCanceled():
-                break
+        _export_mask_files(
+            converter,
+            image_list,
+            self.output_dir,
+            save_path,
+            mapping_table,
+            include_null_images,
+            only_checked_images,
+            progress_dialog,
+        )
 
         progress_dialog.close()
         template = self.tr(
