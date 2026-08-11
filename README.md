@@ -67,6 +67,7 @@ This branch introduces a **synchronized split-channel view** with integrated **3
 
 ## 🥳 What's New
 
+- `2026-08-12`: Add support for [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) instance segmentation models.
 - `2026-08-08`: Add support for the [RT-DETRv2-OBB](https://xanylabeling.com/examples/detection/obb) rotated object detection model.
 - `2026-08-08`: Add the [Magic Wand tool](https://xanylabeling.com/docs/x-anylabeling/user_guide#21-creating-shapes) for quickly creating polygons from contiguous color regions.
 - `2026-08-05`: Release X-AnyLabeling v4.0.0.
@@ -95,7 +96,7 @@ This branch introduces a **synchronized split-channel view** with integrated **3
 | :--- | :--- |
 | 🖼️ Image Classification | YOLOv5-Cls, YOLOv8-Cls, YOLO11-Cls, InternImage, PULC |
 | 🎯 Object Detection | YOLOv5/6/7/8/9/10, YOLO11/12/26, YOLOX, YOLO-NAS, D-FINE, DAMO-YOLO, Gold_YOLO, RT-DETR, RF-DETR, DEIMv2 |
-| 🖌️ Instance Segmentation | YOLOv5-Seg, YOLOv8-Seg, YOLO11-Seg, YOLO26-Seg, Hyper-YOLO-Seg, RF-DETR-Seg |
+| 🖌️ Instance Segmentation | YOLOv5-Seg, YOLOv8-Seg, YOLO11-Seg, YOLO26-Seg, Hyper-YOLO-Seg, RF-DETR-Seg, D-FINE-seg |
 | 🏃 Pose Estimation | YOLOv8-Pose, YOLO11-Pose, YOLO26-Pose, DWPose, RTMO |
 | 😀 Face Estimation | SCRFD, YOLOv6Lite-Face |
 | 👣 Tracking | TrackTrack, Bot-SORT, ByteTrack, SAM2/3-Video |
