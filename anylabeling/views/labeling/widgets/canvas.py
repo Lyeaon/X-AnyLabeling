@@ -429,6 +429,7 @@ class Canvas(
                         break
 
             self.moving_shape = False
+            self.update()
 
     def clip_rectangle_to_pixmap(self, shape):
         """Clip rectangle shape to pixmap boundaries"""
@@ -5416,6 +5417,7 @@ class Canvas(
 
                 if self.moving_shape:
                     self.moving_shape = False
+                    self.update()
                 if self.rotating_shape:
                     self.rotating_shape = False
 
