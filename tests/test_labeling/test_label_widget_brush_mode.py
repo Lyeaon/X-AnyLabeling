@@ -185,6 +185,7 @@ class TestLabelWidgetBrushMode(unittest.TestCase):
             is_brush_mode=False,
             set_magic_wand_mode=Mock(),
             set_editing=Mock(),
+            update=Mock(),
             create_mode="polygon",
             _brush_drawing=False,
         )

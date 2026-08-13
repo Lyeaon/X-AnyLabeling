@@ -1179,6 +1179,35 @@ def _non_shortcut_fields() -> list[SettingField]:
             ),
         ),
         SettingField(
+            "canvas.front_cam.nas_dat_v4_root",
+            QT_TRANSLATE_NOOP(SETTINGS_TRANSLATION_CONTEXT, "Front-Cam NAS Root"),
+            "str",
+            "Canvas",
+            "Front Cam",
+            "General",
+            allow_none=True,
+            description=QT_TRANSLATE_NOOP(
+                SETTINGS_TRANSLATION_CONTEXT,
+                "Root directory of the front-cam NAS DAT v4 data. "
+                "Used to resolve front-cam RGB images matched by scan name "
+                "and merged index.",
+            ),
+        ),
+        SettingField(
+            "canvas.front_cam.flat_test_cases_root",
+            QT_TRANSLATE_NOOP(SETTINGS_TRANSLATION_CONTEXT, "Front-Cam Flat Test Cases Root"),
+            "str",
+            "Canvas",
+            "Front Cam",
+            "General",
+            allow_none=True,
+            description=QT_TRANSLATE_NOOP(
+                SETTINGS_TRANSLATION_CONTEXT,
+                "Root directory of the flat test-cases layout front-cam images. "
+                "Expected structure: <root>/<scan_name>/front-cam/<index>.jpg|png"
+            ),
+        ),
+        SettingField(
             "font_family",
             QT_TRANSLATE_NOOP(
                 SETTINGS_TRANSLATION_CONTEXT, "Application Font"

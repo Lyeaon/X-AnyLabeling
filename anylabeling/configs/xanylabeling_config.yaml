@@ -135,6 +135,9 @@ canvas:
     luminance_weight: 0.5
     simplify_epsilon: 0.5
     opacity: 0.6
+  front_cam:
+    nas_dat_v4_root: "\\\\Synology_NAS_8\\Scanning_DATA\\file-service\\dat_v4"
+    flat_test_cases_root: "/Volumes/test_cases"
   cuboid:
     default_depth_vector: [24.0, -24.0]
     min_depth: 5.0

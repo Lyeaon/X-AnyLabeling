@@ -247,6 +247,16 @@ class SettingsRuntimeApplier:
         if key == "canvas.mask.opacity":
             self.apply_canvas_mask()
             return
+        if key == "canvas.front_cam.nas_dat_v4_root":
+            self._widget._config.setdefault("canvas", {}).setdefault(
+                "front_cam", {}
+            )["nas_dat_v4_root"] = "" if value is None else str(value)
+            return
+        if key == "canvas.front_cam.flat_test_cases_root":
+            self._widget._config.setdefault("canvas", {}).setdefault(
+                "front_cam", {}
+            )["flat_test_cases_root"] = "" if value is None else str(value)
+            return
         if key == "shift_auto_shape_color":
             self._widget._runtime_shape_color_shift = int(
                 self._widget._config.get("shift_auto_shape_color", 0)
@@ -392,6 +402,20 @@ class SettingsRuntimeApplier:
         else:
             canvas._magic_wand_threshold = canvas.magic_wand_default_threshold
             canvas.update()
+        if hasattr(self._widget, "channel_canvas") and self._widget.channel_canvas is not None:
+            mc = self._widget.channel_canvas
+            mc.magic_wand_default_threshold = canvas.magic_wand_default_threshold
+            mc.magic_wand_drag_sensitivity = canvas.magic_wand_drag_sensitivity
+            if mc.magic_wand_luminance_weight != luminance_weight:
+                mc.magic_wand_luminance_weight = luminance_weight
+                mc._magic_wand_distance = None
+            mc.magic_wand_simplify_epsilon_px = canvas.magic_wand_simplify_epsilon_px
+            mc.magic_wand_opacity = canvas.magic_wand_opacity
+            if mc._magic_wand_active:
+                mc._update_magic_wand_preview(mc._magic_wand_threshold)
+            else:
+                mc._magic_wand_threshold = mc.magic_wand_default_threshold
+                mc.update()
 
     def apply_canvas_attributes(self) -> None:
         attrs = self._widget._config["canvas"]["attributes"]
